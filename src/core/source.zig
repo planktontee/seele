@@ -93,28 +93,9 @@ pub fn mmapBuffer(file: std.fs.File) MmapBufferError![]align(std.heap.page_size_
     );
 }
 
-pub fn readWithMmapSource(file: File) !void {
-    const buff: []align(std.heap.page_size_min) u8 = try mmapBuffer(file);
-    var reader = Reader.fixed(buff);
-    var mmapSource: MmapSource = .{
-        .buffer = buff,
-        .reader = &reader,
-    };
-    defer mmapSource.deinit();
-
-    while (true) {
-        switch (try mmapSource.nextLine()) {
-            .endOfFileChunk,
-            .line,
-            => |data| {
-                std.debug.print("{s}", .{data});
-            },
-            .endOfFile => break,
-        }
-    }
-}
-
 pub const GrowingDoubleBufferSource = struct {
+    allocator: std.mem.Allocator,
+    rBuff: []u8,
     reader: *Reader,
     growingWriter: *Writer.Allocating,
 
@@ -151,33 +132,13 @@ pub const GrowingDoubleBufferSource = struct {
     }
 
     pub fn deinit(self: *@This()) void {
+        self.allocator.free(self.rBuff);
+        self.rBuff = undefined;
+        self.reader = undefined;
         self.growingWriter.deinit();
+        self.growingWriter = undefined;
     }
 };
-
-// pub fn r() !void {
-//     var buff: [1]u8 = undefined;
-//     // var buff: [units.PipeSize]u8 = undefined;
-//     var fsReader = std.fs.File.stdin().reader(&buff);
-//     var writer = try std.Io.Writer.Allocating.initCapacity(std.heap.page_allocator, units.CacheSize.L3);
-//
-//     var source: GrowingDoubleBufferSource = .{
-//         .growingWriter = &writer,
-//         .reader = &fsReader.interface,
-//     };
-//
-//     defer source.deinit();
-//     while (true) {
-//         switch (try source.nextLine()) {
-//             .endOfFileChunk,
-//             .line,
-//             => |data| {
-//                 std.debug.print("{s}", .{data});
-//             },
-//             .endOfFile => break,
-//         }
-//     }
-// }
 
 pub const SourceReader = union(SourceBufferType) {
     growingDoubleBuffer: *GrowingDoubleBufferSource,

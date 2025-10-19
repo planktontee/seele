@@ -300,17 +300,18 @@ pub fn run(argsRes: *const ArgsRes) RunError!void {
         .sourceReader = rv: {
             switch (sourceBuffer) {
                 .growingDoubleBuffer => |config| {
-                    // var buff: [config.readBuffer]u8 = undefined;
-                    var buff: [units.PipeSize]u8 = undefined;
-                    var fsReader = std.fs.File.stdin().reader(&buff);
+                    const buff = try std.heap.page_allocator.alloc(u8, config.readBuffer);
+                    var fsReader = std.fs.File.stdin().reader(buff);
                     var writer = try std.Io.Writer.Allocating.initCapacity(
                         std.heap.page_allocator,
                         config.targetInitialSize,
                     );
 
                     var growing: source.GrowingDoubleBufferSource = .{
-                        .growingWriter = &writer,
+                        .allocator = std.heap.page_allocator,
+                        .rBuff = buff,
                         .reader = &fsReader.interface,
+                        .growingWriter = &writer,
                     };
                     break :rv .{ .growingDoubleBuffer = &growing };
                 },
@@ -341,15 +342,25 @@ pub fn run(argsRes: *const ArgsRes) RunError!void {
                 .heapGrowing => |size| {
                     var allocating = try std.Io.Writer.Allocating.initCapacity(std.heap.page_allocator, size);
                     var fdWriter = stdout.writer(&.{});
-                    var heapGrowing: sink.AllocToFileWriter = .{
+                    var heapGrowing: sink.HeapGrowingWriter = .{
                         .allocating = &allocating,
                         .fdWriter = &fdWriter,
                     };
                     break :rv .{ .heapGrowing = &heapGrowing };
                 },
+                .buffered => |size| {
+                    const buff = try std.heap.page_allocator.alloc(u8, size);
+                    var writer = stdout.writer(buff);
+                    var buffOwnedWriter: sink.BufferOwnedWriter = .{
+                        .allocator = std.heap.page_allocator,
+                        .buff = buff,
+                        .writer = &writer.interface,
+                    };
+                    break :rv .{ .buffered = &buffOwnedWriter };
+                },
                 .directWrite => {
-                    var fdWriter = stdout.writer(&.{});
-                    break :rv .{ .directWrite = &fdWriter };
+                    var writer = stdout.writer(&.{});
+                    break :rv .{ .directWrite = &writer.interface };
                 },
             }
         },
@@ -365,6 +376,7 @@ pub fn run(argsRes: *const ArgsRes) RunError!void {
             const readEvent = try fSource.nextLine();
             switch (readEvent) {
                 .endOfFile => {
+                    try fSink.ttyReset();
                     try fSink.sink();
                     break;
                 },
@@ -378,6 +390,7 @@ pub fn run(argsRes: *const ArgsRes) RunError!void {
                             if (start != 0) {
                                 _ = try fSink.consume(.{ .endOfLineEvent = line[start..line.len] });
                             } else {
+                                // TODO: use no match event
                                 try fSink.ttyReset();
                             }
                             break;
@@ -400,15 +413,18 @@ pub fn run(argsRes: *const ArgsRes) RunError!void {
                         }
 
                         start = group0.end;
-                        if (start + 1 == line.len and line[start] == '\n') {
-                            _ = try fSink.consume(.{ .endOfLineEvent = "\n" });
-                            start += 1;
-                        }
+                        // // TODO: this is technically wrong, we shouldn't skip this from a match perspective
+                        // if (start + 1 == line.len and line[start] == '\n') {
+                        //     _ = try fSink.consume(.{ .endOfLineEvent = "\n" });
+                        //     start += 1;
+                        // }
                     }
 
                     try fSink.sinkLine();
 
                     if (readEvent == .endOfFileChunk) {
+                        // TODO: hide reset
+                        try fSink.ttyReset();
                         try fSink.sink();
                         break;
                     }
