@@ -5,7 +5,6 @@ const Reader = std.Io.Reader;
 
 pub const DetectTypeError = error{
     UnableToQueryFd,
-    UnsupportedFileType,
 };
 
 pub const FileType = enum {

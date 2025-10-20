@@ -376,10 +376,11 @@ pub fn run(argsRes: *const ArgsRes) RunError!void {
             const readEvent = try fSource.nextLine();
             switch (readEvent) {
                 .endOfFile => {
-                    try fSink.ttyReset();
-                    try fSink.sink();
+                    _ = try fSink.consume(.endOfFile);
                     break;
                 },
+                // I could short circuit the last nextLine run here
+                // but it's cleaner if I do one over and check the last event
                 .endOfFileChunk,
                 .line,
                 => |line| {
@@ -387,47 +388,35 @@ pub fn run(argsRes: *const ArgsRes) RunError!void {
 
                     while (start < line.len) {
                         const matchData = try rgx.offsetMatch(line, start) orelse {
+                            const eol = line[start..line.len];
                             if (start != 0) {
-                                _ = try fSink.consume(.{ .endOfLineEvent = line[start..line.len] });
+                                _ = try fSink.consume(.{ .noMatchEndOfLineAfterMatch = eol });
                             } else {
-                                // TODO: use no match event
-                                try fSink.ttyReset();
+                                _ = try fSink.consume(.{ .noMatchEndOfLine = eol });
                             }
                             break;
                         };
 
                         const group0 = matchData.group(0);
                         if (start != group0.start) {
-                            _ = try fSink.consume(.{ .nonMatchEvent = line[start..group0.start] });
+                            _ = try fSink.consume(.{ .beforeMatch = line[start..group0.start] });
                         }
 
                         const res = try fSink.consume(.{
-                            .matchEvent = .{
+                            .match = .{
                                 .data = group0.slice(line),
                                 .line = line,
                             },
                         });
                         switch (res) {
                             .lineConsumed => break,
-                            .eventSkipped, .eventConsumed => {},
+                            .eventSkipped, .eventConsumed => {
+                                start = group0.end;
+                            },
                         }
-
-                        start = group0.end;
-                        // // TODO: this is technically wrong, we shouldn't skip this from a match perspective
-                        // if (start + 1 == line.len and line[start] == '\n') {
-                        //     _ = try fSink.consume(.{ .endOfLineEvent = "\n" });
-                        //     start += 1;
-                        // }
                     }
 
-                    try fSink.sinkLine();
-
-                    if (readEvent == .endOfFileChunk) {
-                        // TODO: hide reset
-                        try fSink.ttyReset();
-                        try fSink.sink();
-                        break;
-                    }
+                    _ = try fSink.consume(.endOfLine);
                 },
             }
         }

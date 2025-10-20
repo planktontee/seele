@@ -30,11 +30,11 @@ pub fn pickSinkBuffer(fileType: fs.FileType, eventHandler: EventHandler) SinkBuf
             };
         },
         .generic,
+        => return .directWrite,
+        // TODO: check which i/os would benefit from buffered
+        // could be tied to write strategy (line by line) vs chunked
         .characterDevice,
         .pipe,
-        => return .directWrite,
-        // TODO: check Ios would benefit from bufferd
-        // could be tied to write strategy (line by line)
         .file,
         => return .{ .buffered = units.CacheSize.L3 },
     }
@@ -70,9 +70,12 @@ pub const MatchEvent = struct {
 };
 
 pub const Events = union(enum) {
-    matchEvent: MatchEvent,
-    nonMatchEvent: []const u8,
-    endOfLineEvent: []const u8,
+    beforeMatch: []const u8,
+    match: MatchEvent,
+    noMatchEndOfLineAfterMatch: []const u8,
+    noMatchEndOfLine: []const u8,
+    endOfLine,
+    endOfFile,
 };
 
 // NOTE: this is not a writer because flush calls drain repeteadly
@@ -191,11 +194,11 @@ pub const Sink = struct {
     }
 
     pub fn sinkLine(self: *const @This()) Writer.Error!void {
+        // TODO: do I need a flush strategy too?
         switch (self.fileType) {
             .tty => {
                 switch (self.sinkWriter) {
                     .heapGrowing => |alloc| try alloc.flush(),
-                    // TODO: do I need a flush strategy too?
                     .buffered,
                     .directWrite,
                     => {},
@@ -238,20 +241,33 @@ pub const Sink = struct {
         switch (self.eventHandler) {
             .colorMatch => |config| {
                 switch (event) {
-                    .nonMatchEvent => |data| {
+                    .beforeMatch => |data| {
                         try self.resetColor(config);
                         try self.writeAll(data);
                         try self.reenableColor(config);
                         return .eventConsumed;
                     },
-                    .matchEvent => |matchEvent| {
+                    .match => |matchEvent| {
                         try self.enableColor(config);
                         try self.writeAll(matchEvent.data);
                         return .eventConsumed;
                     },
-                    .endOfLineEvent => |data| {
+                    .noMatchEndOfLineAfterMatch => |data| {
                         try self.disableColor(config);
                         try self.writeAll(data);
+                        return .eventConsumed;
+                    },
+                    .noMatchEndOfLine => {
+                        try self.disableColor(config);
+                        return .eventSkipped;
+                    },
+                    .endOfLine => {
+                        try self.sinkLine();
+                        return .eventConsumed;
+                    },
+                    .endOfFile => {
+                        try self.disableColor(config);
+                        try self.sink();
                         return .eventConsumed;
                     },
                 }
@@ -259,12 +275,21 @@ pub const Sink = struct {
             .skipLineOnMatch => {
                 switch (event) {
                     // Generic events are silenced in this case
-                    .endOfLineEvent,
-                    .nonMatchEvent,
+                    .beforeMatch,
+                    .noMatchEndOfLine,
+                    .noMatchEndOfLineAfterMatch,
                     => return .eventSkipped,
-                    .matchEvent => |matchEvent| {
+                    .match => |matchEvent| {
                         try self.writeAll(matchEvent.line);
                         return .lineConsumed;
+                    },
+                    .endOfLine => {
+                        try self.sinkLine();
+                        return .eventConsumed;
+                    },
+                    .endOfFile => {
+                        try self.sink();
+                        return .eventConsumed;
                     },
                 }
             },

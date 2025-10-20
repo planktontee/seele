@@ -93,6 +93,7 @@ pub fn mmapBuffer(file: std.fs.File) MmapBufferError![]align(std.heap.page_size_
     );
 }
 
+// TODO: grow in place and manage 'capacity' for reader buffer to avoid copying
 pub const GrowingDoubleBufferSource = struct {
     allocator: std.mem.Allocator,
     rBuff: []u8,
