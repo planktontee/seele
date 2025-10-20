@@ -27,3 +27,20 @@ pub fn detectType(file: File) DetectTypeError!FileType {
     }
     unreachable;
 }
+
+pub const AccesType = enum {
+    streaming,
+    positional,
+};
+
+pub fn detectAccessType(fileType: FileType) AccesType {
+    return switch (fileType) {
+        .tty,
+        .generic,
+        .pipe,
+        => .streaming,
+        .characterDevice,
+        .file,
+        => .positional,
+    };
+}

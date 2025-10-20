@@ -295,13 +295,17 @@ pub fn run(argsRes: *const ArgsRes) RunError!void {
     defer fileCursor.close();
 
     const inputFileType = try fs.detectType(file);
+    const inputAccessType = fs.detectAccessType(inputFileType);
     const sourceBuffer = source.pickSourceBuffer(inputFileType);
     var fSource: source.Source = .{
         .sourceReader = rv: {
             switch (sourceBuffer) {
                 .growingDoubleBuffer => |config| {
                     const buff = try std.heap.page_allocator.alloc(u8, config.readBuffer);
-                    var fsReader = std.fs.File.stdin().reader(buff);
+                    var fsReader = switch (inputAccessType) {
+                        .streaming => file.readerStreaming(buff),
+                        .positional => file.reader(buff),
+                    };
                     var writer = try std.Io.Writer.Allocating.initCapacity(
                         std.heap.page_allocator,
                         config.targetInitialSize,
@@ -314,6 +318,20 @@ pub fn run(argsRes: *const ArgsRes) RunError!void {
                         .growingWriter = &writer,
                     };
                     break :rv .{ .growingDoubleBuffer = &growing };
+                },
+                .inPlaceGrowingBuffer => |size| {
+                    const buff = try std.heap.page_allocator.alloc(u8, size);
+                    var fsReader = switch (inputAccessType) {
+                        .streaming => file.readerStreaming(buff),
+                        .positional => file.reader(buff),
+                    };
+
+                    var inPlaceGrowing: source.InPlaceGrowingReader = .{
+                        .allocator = std.heap.page_allocator,
+                        .rBuff = buff,
+                        .reader = &fsReader.interface,
+                    };
+                    break :rv .{ .inPlaceGrowingBuffer = &inPlaceGrowing };
                 },
                 .mmap => {
                     const buff: []align(std.heap.page_size_min) u8 = try source.mmapBuffer(file);
@@ -330,27 +348,34 @@ pub fn run(argsRes: *const ArgsRes) RunError!void {
     defer fSource.deinit();
 
     var stdout = std.fs.File.stdout();
-    const fileType = try fs.detectType(stdout);
-    const eventHandler = sink.pickEventHandler(fileType, stdout, true);
-    const sinkBuffer = sink.pickSinkBuffer(fileType, eventHandler);
+    const outputFileType = try fs.detectType(stdout);
+    const outputAccessType = fs.detectAccessType(outputFileType);
+    const eventHandler = sink.pickEventHandler(outputFileType, stdout, true);
+    const sinkBuffer = sink.pickSinkBuffer(outputFileType, eventHandler);
 
     var fSink: sink.Sink = .{
-        .fileType = fileType,
+        .fileType = outputFileType,
         .eventHandler = eventHandler,
         .sinkWriter = rv: {
             switch (sinkBuffer) {
                 .heapGrowing => |size| {
                     var allocating = try std.Io.Writer.Allocating.initCapacity(std.heap.page_allocator, size);
-                    var fdWriter = stdout.writer(&.{});
+                    var writer = switch (outputAccessType) {
+                        .streaming => stdout.writerStreaming(&.{}),
+                        .positional => stdout.writer(&.{}),
+                    };
                     var heapGrowing: sink.HeapGrowingWriter = .{
                         .allocating = &allocating,
-                        .fdWriter = &fdWriter,
+                        .fdWriter = &writer,
                     };
                     break :rv .{ .heapGrowing = &heapGrowing };
                 },
                 .buffered => |size| {
                     const buff = try std.heap.page_allocator.alloc(u8, size);
-                    var writer = stdout.writer(buff);
+                    var writer = switch (outputAccessType) {
+                        .streaming => stdout.writerStreaming(buff),
+                        .positional => stdout.writer(buff),
+                    };
                     var buffOwnedWriter: sink.BufferOwnedWriter = .{
                         .allocator = std.heap.page_allocator,
                         .buff = buff,
@@ -379,8 +404,6 @@ pub fn run(argsRes: *const ArgsRes) RunError!void {
                     _ = try fSink.consume(.endOfFile);
                     break;
                 },
-                // I could short circuit the last nextLine run here
-                // but it's cleaner if I do one over and check the last event
                 .endOfFileChunk,
                 .line,
                 => |line| {
@@ -417,6 +440,12 @@ pub fn run(argsRes: *const ArgsRes) RunError!void {
                     }
 
                     _ = try fSink.consume(.endOfLine);
+
+                    // NOTE: this avoids one extra syscall for read
+                    if (readEvent == .endOfFileChunk) {
+                        _ = try fSink.consume(.endOfFile);
+                        break;
+                    }
                 },
             }
         }
