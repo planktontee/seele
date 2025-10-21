@@ -16,6 +16,7 @@ const regex = @import("core/regex.zig");
 const sink = @import("core/sink.zig");
 const fs = @import("core/fs.zig");
 const source = @import("core/source.zig");
+const mem = @import("core/mem.zig");
 
 const Args = struct {
     @"line-by-line": bool = true,
@@ -162,8 +163,8 @@ var reporter: *const sink.Reporter = undefined;
 pub fn main() !u8 {
     reporter = rv: {
         var r: sink.Reporter = .{};
-        var buffOut: [units.ByteUnit.mb * 1]u8 = undefined;
-        var buffErr: [units.ByteUnit.mb * 1]u8 = undefined;
+        var buffOut: [units.ByteUnit.kb * 1]u8 = undefined;
+        var buffErr: [units.ByteUnit.kb * 1]u8 = undefined;
 
         r.stdoutW = rOut: {
             var writer = std.fs.File.stderr().writer(&buffOut);
@@ -277,7 +278,7 @@ pub const RunError = error{} ||
     regex.Regex.MatchError ||
     OpenError ||
     fs.DetectTypeError ||
-    source.MmapBufferError ||
+    source.SourceReader.InitError ||
     source.ReadEvent.Error ||
     sink.Sink.ConsumeError ||
     std.Io.tty.Config.SetColorError ||
@@ -285,6 +286,14 @@ pub const RunError = error{} ||
     std.Io.Writer.Error;
 
 pub fn run(argsRes: *const ArgsRes) RunError!void {
+    // NOTE: because Fba only resizes the last piece allocated, we need to split
+    // the stack mem into 2 different allocators to ensure they can grow
+    // Zig issues a prlimit64 for 16mb, I'm taking 12mb here for IO, probably not a good idea and wont work on OSs that return error on that call
+    var inputSfb = mem.stackFallback(units.CacheSize.L2 * 6, std.heap.page_allocator);
+    var outputSfb = mem.stackFallback(units.CacheSize.L2 * 6, std.heap.page_allocator);
+    const inputAlloc = inputSfb.get();
+    const outputAlloc = outputSfb.get();
+
     const matchPattern = argsRes.positionals.tuple.@"0";
     var rgx = try regex.compile(matchPattern, reporter);
     defer rgx.deinit();
@@ -295,97 +304,76 @@ pub fn run(argsRes: *const ArgsRes) RunError!void {
     defer fileCursor.close();
 
     const inputFileType = try fs.detectType(file);
-    const inputAccessType = fs.detectAccessType(inputFileType);
     const sourceBuffer = source.pickSourceBuffer(inputFileType);
+    // TODO: refactor this further
     var fSource: source.Source = .{
         .sourceReader = rv: {
             switch (sourceBuffer) {
-                .growingDoubleBuffer => |config| {
-                    const buff = try std.heap.page_allocator.alloc(u8, config.readBuffer);
-                    var fsReader = switch (inputAccessType) {
-                        .streaming => file.readerStreaming(buff),
-                        .positional => file.reader(buff),
-                    };
-                    var writer = try std.Io.Writer.Allocating.initCapacity(
-                        std.heap.page_allocator,
-                        config.targetInitialSize,
+                .growingDoubleBuffer => {
+                    var w: source.GrowingDoubleBufferSource = undefined;
+                    break :rv try source.SourceReader.init(
+                        file,
+                        inputAlloc,
+                        &w,
                     );
-
-                    var growing: source.GrowingDoubleBufferSource = .{
-                        .allocator = std.heap.page_allocator,
-                        .rBuff = buff,
-                        .reader = &fsReader.interface,
-                        .growingWriter = &writer,
-                    };
-                    break :rv .{ .growingDoubleBuffer = &growing };
                 },
-                .inPlaceGrowingBuffer => |size| {
-                    const buff = try std.heap.page_allocator.alloc(u8, size);
-                    var fsReader = switch (inputAccessType) {
-                        .streaming => file.readerStreaming(buff),
-                        .positional => file.reader(buff),
-                    };
-
-                    var inPlaceGrowing: source.InPlaceGrowingReader = .{
-                        .allocator = std.heap.page_allocator,
-                        .rBuff = buff,
-                        .reader = &fsReader.interface,
-                    };
-                    break :rv .{ .inPlaceGrowingBuffer = &inPlaceGrowing };
+                .inPlaceGrowingBuffer => {
+                    var w: source.InPlaceGrowingReader = undefined;
+                    break :rv try source.SourceReader.init(
+                        file,
+                        inputAlloc,
+                        &w,
+                    );
                 },
                 .mmap => {
-                    const buff: []align(std.heap.page_size_min) u8 = try source.mmapBuffer(file);
-                    var reader = std.Io.Reader.fixed(buff);
-                    var mmapSource: source.MmapSource = .{
-                        .buffer = buff,
-                        .reader = &reader,
-                    };
-                    break :rv .{ .mmap = &mmapSource };
+                    var w: source.MmapSource = undefined;
+                    break :rv try source.SourceReader.init(
+                        file,
+                        inputAlloc,
+                        &w,
+                    );
                 },
             }
         },
     };
     defer fSource.deinit();
 
-    var stdout = std.fs.File.stdout();
+    const stdout = std.fs.File.stdout();
     const outputFileType = try fs.detectType(stdout);
-    const outputAccessType = fs.detectAccessType(outputFileType);
     const eventHandler = sink.pickEventHandler(outputFileType, stdout, true);
     const sinkBuffer = sink.pickSinkBuffer(outputFileType, eventHandler);
 
+    // TODO: refactor this further
     var fSink: sink.Sink = .{
         .fileType = outputFileType,
         .eventHandler = eventHandler,
         .sinkWriter = rv: {
             switch (sinkBuffer) {
-                .heapGrowing => |size| {
-                    var allocating = try std.Io.Writer.Allocating.initCapacity(std.heap.page_allocator, size);
-                    var writer = switch (outputAccessType) {
-                        .streaming => stdout.writerStreaming(&.{}),
-                        .positional => stdout.writer(&.{}),
-                    };
-                    var heapGrowing: sink.HeapGrowingWriter = .{
-                        .allocating = &allocating,
-                        .fdWriter = &writer,
-                    };
-                    break :rv .{ .heapGrowing = &heapGrowing };
+                .growing => {
+                    var growing: sink.GrowingWriter = undefined;
+                    break :rv try sink.SinkWriter.init(
+                        stdout,
+                        outputAlloc,
+                        true,
+                        &growing,
+                    );
                 },
-                .buffered => |size| {
-                    const buff = try std.heap.page_allocator.alloc(u8, size);
-                    var writer = switch (outputAccessType) {
-                        .streaming => stdout.writerStreaming(buff),
-                        .positional => stdout.writer(buff),
-                    };
-                    var buffOwnedWriter: sink.BufferOwnedWriter = .{
-                        .allocator = std.heap.page_allocator,
-                        .buff = buff,
-                        .writer = &writer.interface,
-                    };
-                    break :rv .{ .buffered = &buffOwnedWriter };
+                .buffered => {
+                    var buffered: sink.BufferOwnedWriter = undefined;
+                    break :rv try sink.SinkWriter.init(
+                        stdout,
+                        outputAlloc,
+                        true,
+                        &buffered,
+                    );
                 },
                 .directWrite => {
-                    var writer = stdout.writer(&.{});
-                    break :rv .{ .directWrite = &writer.interface };
+                    break :rv try sink.SinkWriter.init(
+                        stdout,
+                        outputAlloc,
+                        true,
+                        @constCast(&{}),
+                    );
                 },
             }
         },

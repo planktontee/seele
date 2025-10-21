@@ -4,19 +4,20 @@ const fs = @import("fs.zig");
 const File = std.fs.File;
 const Writer = std.Io.Writer;
 
+// TODO: delete this
 pub const Reporter = struct {
     stdoutW: *Writer = undefined,
     stderrW: *Writer = undefined,
 };
 
 pub const SinkBufferType = enum {
-    heapGrowing,
+    growing,
     buffered,
     directWrite,
 };
 
 pub const SinkBuffer = union(SinkBufferType) {
-    heapGrowing: usize,
+    growing: usize,
     buffered: usize,
     directWrite,
 };
@@ -25,18 +26,15 @@ pub fn pickSinkBuffer(fileType: fs.FileType, eventHandler: EventHandler) SinkBuf
     switch (fileType) {
         .tty => {
             return switch (eventHandler) {
-                .colorMatch => .{ .heapGrowing = units.CacheSize.L3 },
+                .colorMatch => .{ .growing = units.CacheSize.L2 },
                 else => .directWrite,
             };
         },
         .generic,
-        => return .directWrite,
-        // TODO: check which i/os would benefit from buffered
-        // could be tied to write strategy (line by line) vs chunked
         .characterDevice,
         .pipe,
         .file,
-        => return .{ .buffered = units.CacheSize.L3 },
+        => return .{ .buffered = units.CacheSize.L2 },
     }
     unreachable;
 }
@@ -80,11 +78,11 @@ pub const Events = union(enum) {
 
 // NOTE: this is not a writer because flush calls drain repeteadly
 // Allocating doesnt accept chaining
-pub const HeapGrowingWriter = struct {
-    allocating: *std.Io.Writer.Allocating,
-    fdWriter: *std.fs.File.Writer,
+pub const GrowingWriter = struct {
+    allocating: std.Io.Writer.Allocating,
+    fdWriter: std.fs.File.Writer,
 
-    pub fn flush(self: *@This()) !void {
+    pub fn flush(self: *@This()) Writer.Error!void {
         const buff = self.allocating.writer.buffered();
         try self.fdWriter.interface.writeAll(buff);
         _ = self.allocating.writer.consumeAll();
@@ -96,27 +94,66 @@ pub const HeapGrowingWriter = struct {
 
     pub fn deinit(self: *@This()) void {
         self.allocating.deinit();
-        self.allocating = undefined;
-        self.fdWriter = undefined;
     }
 };
 
 pub const BufferOwnedWriter = struct {
     allocator: std.mem.Allocator,
-    buff: []u8,
-    writer: *Writer,
+    writer: File.Writer,
 
     pub fn deinit(self: *@This()) void {
-        self.allocator.free(self.buff);
-        self.buff = undefined;
-        self.writer = undefined;
+        self.allocator.free(self.writer.interface.buffer);
     }
 };
 
 pub const SinkWriter = union(SinkBufferType) {
-    heapGrowing: *HeapGrowingWriter,
+    growing: *GrowingWriter,
     buffered: *BufferOwnedWriter,
-    directWrite: *std.Io.Writer,
+    directWrite: File.Writer,
+
+    pub const InitError = std.mem.Allocator.Error ||
+        fs.DetectTypeError;
+
+    pub fn init(file: File, allocator: std.mem.Allocator, hasColor: bool, container: anytype) InitError!@This() {
+        const outputFileType = try fs.detectType(file);
+        const outputAccessType = fs.detectAccessType(outputFileType);
+        const eventHandler = pickEventHandler(outputFileType, file, hasColor);
+        const sinkBuffer = pickSinkBuffer(outputFileType, eventHandler);
+
+        return switch (sinkBuffer) {
+            .growing => |size| rv: {
+                const allocating = try std.Io.Writer.Allocating.initCapacity(allocator, size);
+                const writer = switch (outputAccessType) {
+                    .streaming => file.writerStreaming(&.{}),
+                    .positional => file.writer(&.{}),
+                };
+
+                const growing: *GrowingWriter = @ptrCast(@alignCast(container));
+                growing.* = .{
+                    .allocating = allocating,
+                    .fdWriter = writer,
+                };
+                break :rv .{ .growing = growing };
+            },
+            .buffered => |size| rv: {
+                const buff = try allocator.alloc(u8, size);
+                const writer = switch (outputAccessType) {
+                    .streaming => file.writerStreaming(buff),
+                    .positional => file.writer(buff),
+                };
+
+                const buffered: *BufferOwnedWriter = @ptrCast(@alignCast(container));
+                buffered.* = .{
+                    .allocator = allocator,
+                    .writer = writer,
+                };
+                break :rv .{ .buffered = buffered };
+            },
+            .directWrite => rv: {
+                break :rv .{ .directWrite = file.writer(&.{}) };
+            },
+        };
+    }
 };
 
 pub const Sink = struct {
@@ -127,27 +164,26 @@ pub const Sink = struct {
     sinkWriter: SinkWriter,
 
     pub fn sendColor(
-        self: *const @This(),
+        self: *@This(),
         config: std.Io.tty.Config,
         color: std.Io.tty.Color,
     ) std.Io.tty.Config.SetColorError!void {
         switch (self.sinkWriter) {
-            .heapGrowing => |alloc| try config.setColor(alloc.writer(), color),
-            .buffered,
-            .directWrite,
-            => {},
+            .growing => |w| try config.setColor(w.writer(), color),
+            .buffered => |w| try config.setColor(&w.writer.interface, color),
+            .directWrite => |*w| try config.setColor(&w.interface, color),
         }
     }
 
     pub fn resetColor(
-        self: *const @This(),
+        self: *@This(),
         config: std.Io.tty.Config,
     ) std.Io.tty.Config.SetColorError!void {
         if (self.colorEnabled) try self.sendColor(config, .reset);
     }
 
     pub fn reenableColor(
-        self: *const @This(),
+        self: *@This(),
         config: std.Io.tty.Config,
     ) std.Io.tty.Config.SetColorError!void {
         if (self.colorEnabled) try self.sendColor(config, .bright_red);
@@ -176,29 +212,28 @@ pub const Sink = struct {
         }
     }
 
-    pub fn writeAll(self: *const @This(), data: []const u8) Writer.Error!void {
+    pub fn writeAll(self: *@This(), data: []const u8) Writer.Error!void {
         switch (self.sinkWriter) {
-            .heapGrowing,
+            .growing,
             => |w| {
                 try w.writer().writeAll(data);
             },
             .buffered,
             => |w| {
-                try w.writer.writeAll(data);
+                try w.writer.interface.writeAll(data);
             },
-            .directWrite,
-            => |w| {
-                try w.writeAll(data);
+            .directWrite => |*w| {
+                try w.interface.writeAll(data);
             },
         }
     }
 
-    pub fn sinkLine(self: *const @This()) Writer.Error!void {
+    pub fn sinkLine(self: *@This()) Writer.Error!void {
         // TODO: do I need a flush strategy too?
         switch (self.fileType) {
             .tty => {
                 switch (self.sinkWriter) {
-                    .heapGrowing => |alloc| try alloc.flush(),
+                    .growing => |alloc| try alloc.flush(),
                     .buffered,
                     .directWrite,
                     => {},
@@ -208,18 +243,18 @@ pub const Sink = struct {
         }
     }
 
-    pub fn sink(self: *const @This()) Writer.Error!void {
+    pub fn sink(self: *@This()) Writer.Error!void {
         switch (self.sinkWriter) {
-            .heapGrowing => |w| try w.flush(),
-            .buffered => |w| try w.writer.flush(),
+            .growing => |w| try w.flush(),
+            .buffered => |w| try w.writer.interface.flush(),
             .directWrite => {},
         }
     }
 
     pub fn deinit(self: *@This()) void {
         switch (self.sinkWriter) {
-            inline .buffered,
-            .heapGrowing,
+            inline .growing,
+            .buffered,
             => |w| w.deinit(),
             .directWrite,
             => {},
