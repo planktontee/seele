@@ -15,8 +15,7 @@ pub const FileType = enum {
     generic,
 };
 
-pub fn detectType(file: File) DetectTypeError!FileType {
-    const stat = file.stat() catch return DetectTypeError.UnableToQueryFd;
+pub fn detectType(file: File, stat: *const File.Stat) FileType {
     switch (stat.kind) {
         .character_device => {
             return if (file.isTty()) .tty else .characterDevice;
@@ -44,3 +43,23 @@ pub fn detectAccessType(fileType: FileType) AccesType {
         => .positional,
     };
 }
+
+// DLS to avoid syscalls
+pub const DetailedFile = struct {
+    file: File,
+    // NOTE: this is frozen in time at from
+    stat: File.Stat,
+    accessType: AccesType,
+    fileType: FileType,
+
+    pub fn from(file: File) DetectTypeError!@This() {
+        const stat = file.stat() catch return DetectTypeError.UnableToQueryFd;
+        const fileType = detectType(file, &stat);
+        return .{
+            .file = file,
+            .stat = stat,
+            .accessType = detectAccessType(fileType),
+            .fileType = fileType,
+        };
+    }
+};

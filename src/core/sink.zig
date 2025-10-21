@@ -1,6 +1,7 @@
 const std = @import("std");
 const units = @import("zpec").units;
 const fs = @import("fs.zig");
+const args = @import("args.zig");
 const File = std.fs.File;
 const Writer = std.Io.Writer;
 
@@ -22,8 +23,8 @@ pub const SinkBuffer = union(SinkBufferType) {
     directWrite,
 };
 
-pub fn pickSinkBuffer(fileType: fs.FileType, eventHandler: EventHandler) SinkBuffer {
-    switch (fileType) {
+pub fn pickSinkBuffer(fDetailed: *const fs.DetailedFile, eventHandler: EventHandler) SinkBuffer {
+    switch (fDetailed.fileType) {
         .tty => {
             return switch (eventHandler) {
                 .colorMatch => .{ .growing = units.CacheSize.L2 },
@@ -42,13 +43,16 @@ pub fn pickSinkBuffer(fileType: fs.FileType, eventHandler: EventHandler) SinkBuf
 pub const EventHandler = union(enum) {
     colorMatch: std.Io.tty.Config,
     skipLineOnMatch,
+    pickNonMatchingLine,
 };
 
-pub fn pickEventHandler(fileType: fs.FileType, file: File, colored: bool) EventHandler {
-    switch (fileType) {
+pub fn pickEventHandler(fDetailed: *const fs.DetailedFile, argsRes: *const args.ArgsRes) EventHandler {
+    if (argsRes.options.@"invert-match") return .pickNonMatchingLine;
+
+    switch (fDetailed.fileType) {
         .tty => {
-            if (colored) {
-                return .{ .colorMatch = .detect(file) };
+            if (argsRes.options.hasColor(fDetailed.fileType)) {
+                return .{ .colorMatch = .detect(fDetailed.file) };
             } else {
                 return .skipLineOnMatch;
             }
@@ -113,14 +117,10 @@ pub const SinkWriter = union(SinkBufferType) {
     buffered: File.Writer,
     directWrite: File.Writer,
 
-    pub const InitError = std.mem.Allocator.Error ||
-        fs.DetectTypeError;
+    pub const InitError = std.mem.Allocator.Error;
 
-    pub fn init(file: File, allocator: std.mem.Allocator, hasColor: bool) InitError!@This() {
-        const outputFileType = try fs.detectType(file);
-        const outputAccessType = fs.detectAccessType(outputFileType);
-        const eventHandler = pickEventHandler(outputFileType, file, hasColor);
-        const sinkBuffer = pickSinkBuffer(outputFileType, eventHandler);
+    pub fn init(fDetailed: *const fs.DetailedFile, allocator: std.mem.Allocator, eventHandler: EventHandler) InitError!@This() {
+        const sinkBuffer = pickSinkBuffer(fDetailed, eventHandler);
 
         return switch (sinkBuffer) {
             .growing => |size| rv: {
@@ -128,9 +128,9 @@ pub const SinkWriter = union(SinkBufferType) {
                 errdefer allocator.destroy(growing);
 
                 const allocating = try std.Io.Writer.Allocating.initCapacity(allocator, size);
-                const writer = switch (outputAccessType) {
-                    .streaming => file.writerStreaming(&.{}),
-                    .positional => file.writer(&.{}),
+                const writer = switch (fDetailed.accessType) {
+                    .streaming => fDetailed.file.writerStreaming(&.{}),
+                    .positional => fDetailed.file.writer(&.{}),
                 };
 
                 growing.* = .{
@@ -141,14 +141,14 @@ pub const SinkWriter = union(SinkBufferType) {
             },
             .buffered => |size| rv: {
                 const buff = try allocator.alloc(u8, size);
-                const writer = switch (outputAccessType) {
-                    .streaming => file.writerStreaming(buff),
-                    .positional => file.writer(buff),
+                const writer = switch (fDetailed.accessType) {
+                    .streaming => fDetailed.file.writerStreaming(buff),
+                    .positional => fDetailed.file.writer(buff),
                 };
                 break :rv .{ .buffered = writer };
             },
             .directWrite => rv: {
-                break :rv .{ .directWrite = file.writer(&.{}) };
+                break :rv .{ .directWrite = fDetailed.file.writer(&.{}) };
             },
         };
     }
@@ -161,12 +161,15 @@ pub const Sink = struct {
     colorEnabled: bool = false,
     sinkWriter: SinkWriter,
 
-    pub fn init(file: File, allocator: std.mem.Allocator, hasColor: bool) SinkWriter.InitError!@This() {
-        const fileType = try fs.detectType(file);
+    pub fn init(fDetailed: *const fs.DetailedFile, allocator: std.mem.Allocator, argsRes: *const args.ArgsRes) SinkWriter.InitError!@This() {
+        const eventHandler = pickEventHandler(
+            fDetailed,
+            argsRes,
+        );
         return .{
-            .fileType = fileType,
-            .eventHandler = pickEventHandler(fileType, file, hasColor),
-            .sinkWriter = try .init(file, allocator, hasColor),
+            .fileType = fDetailed.fileType,
+            .eventHandler = eventHandler,
+            .sinkWriter = try .init(fDetailed, allocator, eventHandler),
         };
     }
 
@@ -328,6 +331,27 @@ pub const Sink = struct {
                         try self.writeAll(matchEvent.line);
                         return .lineConsumed;
                     },
+                    .endOfLine => {
+                        try self.sinkLine();
+                        return .eventConsumed;
+                    },
+                    .endOfFile => {
+                        try self.sink();
+                        return .eventConsumed;
+                    },
+                }
+            },
+            .pickNonMatchingLine => {
+                switch (event) {
+                    // Generic events are silenced in this case
+                    .noMatchEndOfLine => |line| {
+                        try self.writeAll(line);
+                        return .lineConsumed;
+                    },
+                    .beforeMatch,
+                    .noMatchEndOfLineAfterMatch,
+                    .match,
+                    => return .eventSkipped,
                     .endOfLine => {
                         try self.sinkLine();
                         return .eventConsumed;

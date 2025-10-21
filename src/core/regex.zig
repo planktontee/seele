@@ -127,10 +127,6 @@ pub const RegexMatchGroup = struct {
             .end = end,
         };
     }
-
-    pub fn slice(self: *const @This(), data: []const u8) []const u8 {
-        return data[self.start..self.end];
-    }
 };
 
 pub const RegexMatch = struct {

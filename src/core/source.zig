@@ -17,9 +17,9 @@ pub const SourceBuffer = union(SourceBufferType) {
     mmap,
 };
 
-pub fn pickSourceBuffer(fileType: fs.FileType) SourceBuffer {
+pub fn pickSourceBuffer(fDetailed: *const fs.DetailedFile) SourceBuffer {
     // NOTE: capped sources wont read more than cap even with iovecs
-    switch (fileType) {
+    switch (fDetailed.fileType) {
         // => return .{
         //     .growingDoubleBuffer = .{
         //         .readBuffer = units.PipeSize,
@@ -81,20 +81,17 @@ pub const MmapSource = struct {
 
     pub const MmapBufferError = std.posix.RealPathError || std.posix.MMapError;
 
-    pub fn mmapBuffer(file: File) MmapBufferError![]align(std.heap.page_size_min) u8 {
-        const stats = try file.stat();
-        const fSize = stats.size;
-
+    pub fn mmapBuffer(fDetailed: *const fs.DetailedFile) MmapBufferError![]align(std.heap.page_size_min) u8 {
         return try std.posix.mmap(
             null,
-            fSize,
+            fDetailed.stat.size,
             std.posix.PROT.READ,
             .{
                 .TYPE = .SHARED,
                 .NONBLOCK = true,
                 .POPULATE = true,
             },
-            file.handle,
+            fDetailed.file.handle,
             0,
         );
     }
@@ -204,10 +201,8 @@ pub const SourceReader = union(SourceBufferType) {
         MmapSource.MmapBufferError ||
         fs.DetectTypeError;
 
-    pub fn init(file: File, allocator: std.mem.Allocator) InitError!@This() {
-        const inputFileType = try fs.detectType(file);
-        const inputAccessType = fs.detectAccessType(inputFileType);
-        const sourceBuffer = pickSourceBuffer(inputFileType);
+    pub fn init(fDetailed: *const fs.DetailedFile, allocator: std.mem.Allocator) InitError!@This() {
+        const sourceBuffer = pickSourceBuffer(fDetailed);
 
         return switch (sourceBuffer) {
             .growingDoubleBuffer => |config| rv: {
@@ -217,9 +212,9 @@ pub const SourceReader = union(SourceBufferType) {
                 const buff = try allocator.alloc(u8, config.readBuffer);
                 errdefer allocator.free(buff);
 
-                const fsReader = switch (inputAccessType) {
-                    .streaming => file.readerStreaming(buff),
-                    .positional => file.reader(buff),
+                const fsReader = switch (fDetailed.accessType) {
+                    .streaming => fDetailed.file.readerStreaming(buff),
+                    .positional => fDetailed.file.reader(buff),
                 };
                 const writer = try std.Io.Writer.Allocating.initCapacity(
                     std.heap.page_allocator,
@@ -237,9 +232,9 @@ pub const SourceReader = union(SourceBufferType) {
                 errdefer allocator.destroy(inPlace);
 
                 const buff = try allocator.alloc(u8, config.initialSize);
-                const fsReader = switch (inputAccessType) {
-                    .streaming => file.readerStreaming(buff),
-                    .positional => file.reader(buff),
+                const fsReader = switch (fDetailed.accessType) {
+                    .streaming => fDetailed.file.readerStreaming(buff),
+                    .positional => fDetailed.file.reader(buff),
                 };
 
                 inPlace.* = .{
@@ -253,7 +248,7 @@ pub const SourceReader = union(SourceBufferType) {
                 const mmapSrc = try allocator.create(MmapSource);
                 errdefer allocator.destroy(mmapSrc);
 
-                const buff: []align(std.heap.page_size_min) u8 = try MmapSource.mmapBuffer(file);
+                const buff: []align(std.heap.page_size_min) u8 = try MmapSource.mmapBuffer(fDetailed);
 
                 mmapSrc.* = .{
                     .buffer = buff,
@@ -268,9 +263,9 @@ pub const SourceReader = union(SourceBufferType) {
 pub const Source = struct {
     sourceReader: SourceReader,
 
-    pub fn init(file: File, allocator: std.mem.Allocator) SourceReader.InitError!@This() {
+    pub fn init(fDetailed: *const fs.DetailedFile, allocator: std.mem.Allocator) SourceReader.InitError!@This() {
         return .{
-            .sourceReader = try .init(file, allocator),
+            .sourceReader = try .init(fDetailed, allocator),
         };
     }
 
