@@ -92,8 +92,10 @@ pub const GrowingWriter = struct {
         return &self.allocating.writer;
     }
 
-    pub fn deinit(self: *@This()) void {
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         self.allocating.deinit();
+        allocator.destroy(self);
+        self.* = undefined;
     }
 };
 
@@ -108,13 +110,13 @@ pub const BufferOwnedWriter = struct {
 
 pub const SinkWriter = union(SinkBufferType) {
     growing: *GrowingWriter,
-    buffered: *BufferOwnedWriter,
+    buffered: File.Writer,
     directWrite: File.Writer,
 
     pub const InitError = std.mem.Allocator.Error ||
         fs.DetectTypeError;
 
-    pub fn init(file: File, allocator: std.mem.Allocator, hasColor: bool, container: anytype) InitError!@This() {
+    pub fn init(file: File, allocator: std.mem.Allocator, hasColor: bool) InitError!@This() {
         const outputFileType = try fs.detectType(file);
         const outputAccessType = fs.detectAccessType(outputFileType);
         const eventHandler = pickEventHandler(outputFileType, file, hasColor);
@@ -122,13 +124,15 @@ pub const SinkWriter = union(SinkBufferType) {
 
         return switch (sinkBuffer) {
             .growing => |size| rv: {
+                const growing = try allocator.create(GrowingWriter);
+                errdefer allocator.destroy(growing);
+
                 const allocating = try std.Io.Writer.Allocating.initCapacity(allocator, size);
                 const writer = switch (outputAccessType) {
                     .streaming => file.writerStreaming(&.{}),
                     .positional => file.writer(&.{}),
                 };
 
-                const growing: *GrowingWriter = @ptrCast(@alignCast(container));
                 growing.* = .{
                     .allocating = allocating,
                     .fdWriter = writer,
@@ -141,13 +145,7 @@ pub const SinkWriter = union(SinkBufferType) {
                     .streaming => file.writerStreaming(buff),
                     .positional => file.writer(buff),
                 };
-
-                const buffered: *BufferOwnedWriter = @ptrCast(@alignCast(container));
-                buffered.* = .{
-                    .allocator = allocator,
-                    .writer = writer,
-                };
-                break :rv .{ .buffered = buffered };
+                break :rv .{ .buffered = writer };
             },
             .directWrite => rv: {
                 break :rv .{ .directWrite = file.writer(&.{}) };
@@ -163,6 +161,15 @@ pub const Sink = struct {
     colorEnabled: bool = false,
     sinkWriter: SinkWriter,
 
+    pub fn init(file: File, allocator: std.mem.Allocator, hasColor: bool) SinkWriter.InitError!@This() {
+        const fileType = try fs.detectType(file);
+        return .{
+            .fileType = fileType,
+            .eventHandler = pickEventHandler(fileType, file, hasColor),
+            .sinkWriter = try .init(file, allocator, hasColor),
+        };
+    }
+
     pub fn sendColor(
         self: *@This(),
         config: std.Io.tty.Config,
@@ -170,8 +177,9 @@ pub const Sink = struct {
     ) std.Io.tty.Config.SetColorError!void {
         switch (self.sinkWriter) {
             .growing => |w| try config.setColor(w.writer(), color),
-            .buffered => |w| try config.setColor(&w.writer.interface, color),
-            .directWrite => |*w| try config.setColor(&w.interface, color),
+            .buffered,
+            .directWrite,
+            => |*w| try config.setColor(&w.interface, color),
         }
     }
 
@@ -219,10 +227,8 @@ pub const Sink = struct {
                 try w.writer().writeAll(data);
             },
             .buffered,
-            => |w| {
-                try w.writer.interface.writeAll(data);
-            },
-            .directWrite => |*w| {
+            .directWrite,
+            => |*w| {
                 try w.interface.writeAll(data);
             },
         }
@@ -235,6 +241,7 @@ pub const Sink = struct {
                 switch (self.sinkWriter) {
                     .growing => |alloc| try alloc.flush(),
                     .buffered,
+                    => |*w| try w.interface.flush(),
                     .directWrite,
                     => {},
                 }
@@ -246,18 +253,21 @@ pub const Sink = struct {
     pub fn sink(self: *@This()) Writer.Error!void {
         switch (self.sinkWriter) {
             .growing => |w| try w.flush(),
-            .buffered => |w| try w.writer.interface.flush(),
+            .buffered => |*w| try w.interface.flush(),
             .directWrite => {},
         }
     }
 
-    pub fn deinit(self: *@This()) void {
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         switch (self.sinkWriter) {
-            inline .growing,
+            .growing,
+            => |w| w.deinit(allocator),
             .buffered,
-            => |w| w.deinit(),
             .directWrite,
-            => {},
+            => |*w| {
+                allocator.free(w.interface.buffer);
+                allocator.destroy(w);
+            },
         }
     }
 

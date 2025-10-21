@@ -73,8 +73,10 @@ pub const MmapSource = struct {
         return .{ .line = line };
     }
 
-    pub fn deinit(self: *@This()) void {
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         std.posix.munmap(self.buffer);
+        allocator.destroy(self);
+        self.* = undefined;
     }
 
     pub const MmapBufferError = std.posix.RealPathError || std.posix.MMapError;
@@ -132,13 +134,14 @@ pub const InPlaceGrowingReader = struct {
         return .{ .line = line };
     }
 
-    pub fn deinit(self: *@This()) void {
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         self.allocator.free(self.fsReader.interface.buffer);
+        allocator.destroy(self);
+        self.* = undefined;
     }
 };
 
 pub const GrowingDoubleBufferSource = struct {
-    allocator: std.mem.Allocator,
     fsReader: File.Reader,
     growingWriter: Writer.Allocating,
 
@@ -185,8 +188,10 @@ pub const GrowingDoubleBufferSource = struct {
         return .{ .line = self.recoverBuffer() };
     }
 
-    pub fn deinit(self: *@This()) void {
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         self.growingWriter.deinit();
+        allocator.destroy(self);
+        self.* = undefined;
     }
 };
 
@@ -199,14 +204,19 @@ pub const SourceReader = union(SourceBufferType) {
         MmapSource.MmapBufferError ||
         fs.DetectTypeError;
 
-    pub fn init(file: File, allocator: std.mem.Allocator, container: anytype) InitError!@This() {
+    pub fn init(file: File, allocator: std.mem.Allocator) InitError!@This() {
         const inputFileType = try fs.detectType(file);
         const inputAccessType = fs.detectAccessType(inputFileType);
         const sourceBuffer = pickSourceBuffer(inputFileType);
 
         return switch (sourceBuffer) {
             .growingDoubleBuffer => |config| rv: {
+                const growing = try allocator.create(GrowingDoubleBufferSource);
+                errdefer allocator.destroy(growing);
+
                 const buff = try allocator.alloc(u8, config.readBuffer);
+                errdefer allocator.free(buff);
+
                 const fsReader = switch (inputAccessType) {
                     .streaming => file.readerStreaming(buff),
                     .positional => file.reader(buff),
@@ -216,22 +226,22 @@ pub const SourceReader = union(SourceBufferType) {
                     config.targetInitialSize,
                 );
 
-                const growing: *GrowingDoubleBufferSource = @ptrCast(@alignCast(container));
                 growing.* = .{
-                    .allocator = allocator,
                     .fsReader = fsReader,
                     .growingWriter = writer,
                 };
                 break :rv .{ .growingDoubleBuffer = growing };
             },
             .inPlaceGrowingBuffer => |config| rv: {
+                const inPlace = try allocator.create(InPlaceGrowingReader);
+                errdefer allocator.destroy(inPlace);
+
                 const buff = try allocator.alloc(u8, config.initialSize);
                 const fsReader = switch (inputAccessType) {
                     .streaming => file.readerStreaming(buff),
                     .positional => file.reader(buff),
                 };
 
-                const inPlace: *InPlaceGrowingReader = @ptrCast(@alignCast(container));
                 inPlace.* = .{
                     .allocator = allocator,
                     .growthFactor = config.growthFactor,
@@ -240,8 +250,11 @@ pub const SourceReader = union(SourceBufferType) {
                 break :rv .{ .inPlaceGrowingBuffer = inPlace };
             },
             .mmap => rv: {
+                const mmapSrc = try allocator.create(MmapSource);
+                errdefer allocator.destroy(mmapSrc);
+
                 const buff: []align(std.heap.page_size_min) u8 = try MmapSource.mmapBuffer(file);
-                const mmapSrc: *MmapSource = @ptrCast(@alignCast(container));
+
                 mmapSrc.* = .{
                     .buffer = buff,
                     .reader = .fixed(buff),
@@ -255,6 +268,12 @@ pub const SourceReader = union(SourceBufferType) {
 pub const Source = struct {
     sourceReader: SourceReader,
 
+    pub fn init(file: File, allocator: std.mem.Allocator) SourceReader.InitError!@This() {
+        return .{
+            .sourceReader = try .init(file, allocator),
+        };
+    }
+
     pub fn nextLine(self: *@This()) ReadEvent.Error!ReadEvent {
         switch (self.sourceReader) {
             inline else => |source| {
@@ -263,9 +282,9 @@ pub const Source = struct {
         }
     }
 
-    pub fn deinit(self: *@This()) void {
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         switch (self.sourceReader) {
-            inline else => |source| source.deinit(),
+            inline else => |source| source.deinit(allocator),
         }
     }
 };

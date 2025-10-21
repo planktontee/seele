@@ -303,82 +303,12 @@ pub fn run(argsRes: *const ArgsRes) RunError!void {
     const file = try fileCursor.next() orelse return;
     defer fileCursor.close();
 
-    const inputFileType = try fs.detectType(file);
-    const sourceBuffer = source.pickSourceBuffer(inputFileType);
-    // TODO: refactor this further
-    var fSource: source.Source = .{
-        .sourceReader = rv: {
-            switch (sourceBuffer) {
-                .growingDoubleBuffer => {
-                    var w: source.GrowingDoubleBufferSource = undefined;
-                    break :rv try source.SourceReader.init(
-                        file,
-                        inputAlloc,
-                        &w,
-                    );
-                },
-                .inPlaceGrowingBuffer => {
-                    var w: source.InPlaceGrowingReader = undefined;
-                    break :rv try source.SourceReader.init(
-                        file,
-                        inputAlloc,
-                        &w,
-                    );
-                },
-                .mmap => {
-                    var w: source.MmapSource = undefined;
-                    break :rv try source.SourceReader.init(
-                        file,
-                        inputAlloc,
-                        &w,
-                    );
-                },
-            }
-        },
-    };
-    defer fSource.deinit();
+    var fSource = try source.Source.init(file, inputAlloc);
+    defer fSource.deinit(inputAlloc);
 
     const stdout = std.fs.File.stdout();
-    const outputFileType = try fs.detectType(stdout);
-    const eventHandler = sink.pickEventHandler(outputFileType, stdout, true);
-    const sinkBuffer = sink.pickSinkBuffer(outputFileType, eventHandler);
-
-    // TODO: refactor this further
-    var fSink: sink.Sink = .{
-        .fileType = outputFileType,
-        .eventHandler = eventHandler,
-        .sinkWriter = rv: {
-            switch (sinkBuffer) {
-                .growing => {
-                    var growing: sink.GrowingWriter = undefined;
-                    break :rv try sink.SinkWriter.init(
-                        stdout,
-                        outputAlloc,
-                        true,
-                        &growing,
-                    );
-                },
-                .buffered => {
-                    var buffered: sink.BufferOwnedWriter = undefined;
-                    break :rv try sink.SinkWriter.init(
-                        stdout,
-                        outputAlloc,
-                        true,
-                        &buffered,
-                    );
-                },
-                .directWrite => {
-                    break :rv try sink.SinkWriter.init(
-                        stdout,
-                        outputAlloc,
-                        true,
-                        @constCast(&{}),
-                    );
-                },
-            }
-        },
-    };
-    defer fSink.deinit();
+    var fSink = try sink.Sink.init(stdout, outputAlloc, true);
+    defer fSink.deinit(outputAlloc);
 
     if (argsRes.options.@"line-by-line") {
         // TODO: checks for ovect[0] > ovect[1]
@@ -415,7 +345,7 @@ pub fn run(argsRes: *const ArgsRes) RunError!void {
 
                         const res = try fSink.consume(.{
                             .match = .{
-                                .data = group0.slice(line),
+                                .data = line[group0.start..group0.end],
                                 .line = line,
                             },
                         });
