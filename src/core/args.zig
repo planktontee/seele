@@ -16,12 +16,16 @@ const fs = @import("fs.zig");
 pub const Args = struct {
     @"line-by-line": bool = true,
     @"invert-match": bool = false,
-    group: ?[]const u8 = null,
+    @"match-only": bool = false,
+
+    // NOTE: default max group num
+    groups: ?[]const u16 = null,
 
     multiline: bool = false,
     recursive: bool = false,
     @"follow-links": bool = false,
     colored: ?bool = null,
+    @"more-colors": bool = false,
     verbose: bool = false,
     byteRanges: ?[]const []const usize = null,
 
@@ -33,7 +37,9 @@ pub const Args = struct {
     pub const Short = .{
         .lB = .@"line-by-line",
         .v = .@"invert-match",
-        .O = .group,
+        .O = .@"match-only",
+
+        .gn = .groups,
 
         .mL = .multiline,
         .R = .recursive,
@@ -61,13 +67,17 @@ pub const Args = struct {
         .optionsDescription = &.{
             .{ .field = .@"line-by-line", .description = "Line by line matching" },
             .{ .field = .@"invert-match", .description = "Invest matches, color wont be applied" },
-            .{ .field = .group, .description = "Output group number only" },
+            .{ .field = .@"match-only", .description = "Display only groups matched" },
+
+            .{ .field = .groups, .description = "Pick group numbers to be colored, or if -O is used, to be displayed" },
 
             .{ .field = .multiline, .description = "Multiline matching" },
             .{ .field = .recursive, .description = "Recursively matches all files in paths" },
             .{ .field = .@"follow-links", .description = "Follow symlinks, using a weakref visitor" },
 
             .{ .field = .colored, .description = "Colors matches" },
+            .{ .field = .@"more-colors", .description = "Uses a color table for group matches" },
+
             .{ .field = .verbose, .description = "Verbose mode" },
             .{ .field = .byteRanges, .description = "Range of bytes for n files, top-level array length has to be of (len <= files.len) and will be applied sequentially over files" },
         },
@@ -159,6 +169,56 @@ pub const Args = struct {
         return !self.@"invert-match" and ((colored != null and colored.? == true) or
             (fileType == .tty and colored == null));
     }
+
+    pub fn targetGroup(self: *const @This(), max: usize) TargetGroup {
+        if (self.groups) |groups| {
+            return .{ .linearIter = .{ .arr = groups } };
+        } else {
+            if (self.@"more-colors" and max > 1) {
+                return .{ .range = .{} };
+            }
+            return .{ .fixed = .{} };
+        }
+    }
+};
+
+pub const FixedGroup = struct {
+    target: usize = 0,
+
+    pub fn includes(self: *const @This(), group: usize) bool {
+        return self.target == group;
+    }
+};
+
+pub const RangeGroup = struct {
+    start: usize = 1,
+    end: usize = std.math.maxInt(usize),
+
+    pub fn includes(self: *const @This(), group: usize) bool {
+        return group >= self.start and group <= self.end;
+    }
+};
+
+pub const LinearIterGroup = struct {
+    i: usize = 0,
+    arr: []const u16,
+
+    pub fn includes(self: *@This(), group: usize) bool {
+        if (self.i >= self.arr.len) return false;
+
+        if (self.arr[self.i] == group) {
+            self.i += 1;
+            return true;
+        }
+
+        return false;
+    }
+};
+
+pub const TargetGroup = union(enum) {
+    fixed: FixedGroup,
+    range: RangeGroup,
+    linearIter: LinearIterGroup,
 };
 
 pub const HelpConf: help.HelpConf = .{

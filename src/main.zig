@@ -126,6 +126,7 @@ pub const FileCursor = struct {
 pub const RunError = error{} ||
     regex.CompileError ||
     regex.Regex.MatchError ||
+    regex.RegexMatch.GroupError ||
     OpenError ||
     fs.DetectTypeError ||
     source.SourceReader.InitError ||
@@ -182,7 +183,7 @@ pub fn run(argsRes: *const args.ArgsRes) RunError!void {
                 => |line| {
                     var start: usize = 0;
 
-                    while (start < line.len) {
+                    lineFeed: while (start < line.len) {
                         const matchData = try rgx.offsetMatch(line, start) orelse {
                             const eol = line[start..line.len];
                             if (start != 0) {
@@ -193,22 +194,32 @@ pub fn run(argsRes: *const args.ArgsRes) RunError!void {
                             break;
                         };
 
-                        const group0 = matchData.group(0);
-                        if (start != group0.start) {
-                            _ = try fSink.consume(.{ .beforeMatch = line[start..group0.start] });
-                        }
+                        var targetGroup = argsRes.options.targetGroup(matchData.count);
+                        for (0..matchData.count) |i| {
+                            switch (targetGroup) {
+                                inline else => |*tg| if (!tg.includes(i)) continue,
+                            }
 
-                        const res = try fSink.consume(.{
-                            .match = .{
-                                .data = line[group0.start..group0.end],
-                                .line = line,
-                            },
-                        });
-                        switch (res) {
-                            .lineConsumed => break,
-                            .eventSkipped, .eventConsumed => {
-                                start = group0.end;
-                            },
+                            const group = try matchData.group(i);
+                            if (start > group.start) continue;
+
+                            if (start < group.start) {
+                                _ = try fSink.consume(.{ .beforeMatch = line[start..group.start] });
+                            }
+
+                            const res = try fSink.consume(.{
+                                .match = .{
+                                    .data = line[group.start..group.end],
+                                    .line = line,
+                                    .groupN = @intCast(i),
+                                },
+                            });
+                            switch (res) {
+                                .lineConsumed => break :lineFeed,
+                                .eventSkipped, .eventConsumed => {
+                                    start = group.end;
+                                },
+                            }
                         }
                     }
 

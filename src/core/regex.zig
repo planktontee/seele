@@ -131,18 +131,22 @@ pub const RegexMatchGroup = struct {
 
 pub const RegexMatch = struct {
     ovector: []const usize,
+    count: usize,
 
     pub fn init(ovector: [*c]usize, length: usize) @This() {
+        const slice = ovector[0 .. length * 2];
         return .{
-            .ovector = ovector[0 .. length * 2],
+            .ovector = slice,
+            .count = slice.len / 2,
         };
     }
 
-    pub fn groupCount(self: *const @This()) usize {
-        return self.ovector.len / 2;
-    }
+    pub const GroupError = error{
+        InvalidGroup,
+    };
 
-    pub fn group(self: *const @This(), n: usize) RegexMatchGroup {
+    pub fn group(self: *const @This(), n: usize) GroupError!RegexMatchGroup {
+        if (n + 1 > self.count) return GroupError.InvalidGroup;
         const start = n * 2;
         const end = n * 2 + 1;
         return .init(n, self.ovector[start], self.ovector[end]);
