@@ -19,13 +19,18 @@ pub const Args = struct {
     @"match-only": bool = false,
 
     // NOTE: default max group num
+    // TODO: reintroduce bracket-less 1d arrays
+    // TODO: expand tokenizer further to parse TargetGroup
+    // TODO: Allow ranges
     groups: ?[]const u16 = null,
 
     multiline: bool = false,
     recursive: bool = false,
     @"follow-links": bool = false,
+
     colored: ?bool = null,
-    @"more-colors": bool = false,
+    @"group-highlight": bool = false,
+
     verbose: bool = false,
     byteRanges: ?[]const []const usize = null,
 
@@ -37,13 +42,15 @@ pub const Args = struct {
     pub const Short = .{
         .lB = .@"line-by-line",
         .v = .@"invert-match",
-        .O = .@"match-only",
+        .o = .@"match-only",
 
-        .gn = .groups,
+        .gN = .groups,
 
         .mL = .multiline,
         .R = .recursive,
         .fL = .@"follow-links",
+
+        .gH = .@"group-highlight",
 
         .bR = .byteRanges,
     };
@@ -76,7 +83,7 @@ pub const Args = struct {
             .{ .field = .@"follow-links", .description = "Follow symlinks, using a weakref visitor" },
 
             .{ .field = .colored, .description = "Colors matches" },
-            .{ .field = .@"more-colors", .description = "Uses a color table for group matches" },
+            .{ .field = .@"group-highlight", .description = "Uses a color table for each group match, this will also only color group matches other than 0 unless overriden with --groups" },
 
             .{ .field = .verbose, .description = "Verbose mode" },
             .{ .field = .byteRanges, .description = "Range of bytes for n files, top-level array length has to be of (len <= files.len) and will be applied sequentially over files" },
@@ -101,7 +108,7 @@ pub const Args = struct {
         pub const Help: HelpData(@This()) = .{
             .usage = &.{"seeksub ... match <options> ..."},
             .description = "Matches based on options at the top-level. This performs no mutation or replacement, it's simply a dry-run",
-            .shortDescription = "Match-only operation. This is a dry-run with no replacement",
+            .shortDescription = "(Default) Match-only operation. This is a dry-run with no replacement",
             .optionsDescription = &.{
                 .{ .field = .@"match-n", .description = "N-match stop for each file if set" },
             },
@@ -170,11 +177,21 @@ pub const Args = struct {
             (fileType == .tty and colored == null));
     }
 
-    pub fn targetGroup(self: *const @This(), max: usize) TargetGroup {
+    pub const TargetGroupError = error{
+        InvalidTargetGroup,
+        TargetGroupsNotSorted,
+    };
+
+    pub fn targetGroup(self: *const @This(), max: usize) TargetGroupError!TargetGroup {
         if (self.groups) |groups| {
+            for (groups) |group| if (group + 1 > max) return TargetGroupError.InvalidTargetGroup;
+            if (groups.len > 1) {
+                // TODO: sort on parse
+                for (1..groups.len) |i| if (groups[i] < groups[i - 1]) return TargetGroupError.TargetGroupsNotSorted;
+            }
             return .{ .linearIter = .{ .arr = groups } };
         } else {
-            if (self.@"more-colors" and max > 1) {
+            if (self.@"group-highlight" and max > 1) {
                 return .{ .range = .{} };
             }
             return .{ .fixed = .{} };
@@ -188,6 +205,10 @@ pub const FixedGroup = struct {
     pub fn includes(self: *const @This(), group: usize) bool {
         return self.target == group;
     }
+
+    pub fn anyOtherThan(_: *const @This(), _: usize) bool {
+        return false;
+    }
 };
 
 pub const RangeGroup = struct {
@@ -197,20 +218,24 @@ pub const RangeGroup = struct {
     pub fn includes(self: *const @This(), group: usize) bool {
         return group >= self.start and group <= self.end;
     }
+
+    pub fn anyOtherThan(self: *const @This(), group: usize) bool {
+        return self.end - group > rv: {
+            break :rv if (self.includes(group)) @as(usize, 1) else @as(usize, 0);
+        };
+    }
 };
 
-pub const LinearIterGroup = struct {
-    i: usize = 0,
+pub const LinearGroup = struct {
     arr: []const u16,
 
-    pub fn includes(self: *@This(), group: usize) bool {
-        if (self.i >= self.arr.len) return false;
+    pub fn includes(self: *const @This(), group: usize) bool {
+        for (self.arr) |item| if (item == group) return true;
+        return false;
+    }
 
-        if (self.arr[self.i] == group) {
-            self.i += 1;
-            return true;
-        }
-
+    pub fn anyOtherThan(self: *const @This(), group: usize) bool {
+        for (self.arr) |item| if (item > group) return true;
         return false;
     }
 };
@@ -218,7 +243,13 @@ pub const LinearIterGroup = struct {
 pub const TargetGroup = union(enum) {
     fixed: FixedGroup,
     range: RangeGroup,
-    linearIter: LinearIterGroup,
+    linearIter: LinearGroup,
+
+    pub fn anyOtherThan(self: *const @This(), group: usize) bool {
+        return switch (self.*) {
+            inline else => |tg| tg.anyOtherThan(group),
+        };
+    }
 };
 
 pub const HelpConf: help.HelpConf = .{

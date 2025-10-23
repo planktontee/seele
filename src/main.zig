@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const zpec = @import("zpec");
 const units = zpec.units;
 const args = @import("core/args.zig");
@@ -124,6 +125,7 @@ pub const FileCursor = struct {
 };
 
 pub const RunError = error{} ||
+    args.Args.TargetGroupError ||
     regex.CompileError ||
     regex.Regex.MatchError ||
     regex.RegexMatch.GroupError ||
@@ -140,8 +142,16 @@ pub fn run(argsRes: *const args.ArgsRes) RunError!void {
     // NOTE: because Fba only resizes the last piece allocated, we need to split
     // the stack mem into 2 different allocators to ensure they can grow
     // Zig issues a prlimit64 for 16mb, I'm taking 12mb here for IO, probably not a good idea and wont work on OSs that return error on that call
-    var inputSfb = mem.stackFallback(units.CacheSize.L2 * 6, std.heap.page_allocator);
-    var outputSfb = mem.stackFallback(units.CacheSize.L2 * 6, std.heap.page_allocator);
+    const stackPartitionSize = rv: {
+        if (builtin.mode == .Debug) {
+            break :rv units.CacheSize.L2 * 2;
+        } else {
+            break :rv units.CacheSize.L2 * 6;
+        }
+        unreachable;
+    };
+    var inputSfb = mem.stackFallback(stackPartitionSize, std.heap.page_allocator);
+    var outputSfb = mem.stackFallback(stackPartitionSize, std.heap.page_allocator);
     const inputAlloc = inputSfb.get();
     const outputAlloc = outputSfb.get();
 
@@ -194,10 +204,14 @@ pub fn run(argsRes: *const args.ArgsRes) RunError!void {
                             break;
                         };
 
-                        var targetGroup = argsRes.options.targetGroup(matchData.count);
+                        // NOTE: handlign group0, group0 contains everything, hightlighting will be
+                        // done on top of that for groups, in case it's needed
+                        const targetGroup = try argsRes.options.targetGroup(matchData.count);
                         for (0..matchData.count) |i| {
-                            switch (targetGroup) {
-                                inline else => |*tg| if (!tg.includes(i)) continue,
+                            if (i != 0) {
+                                switch (targetGroup) {
+                                    inline else => |tg| if (!tg.includes(i)) continue,
+                                }
                             }
 
                             const group = try matchData.group(i);
@@ -209,14 +223,27 @@ pub fn run(argsRes: *const args.ArgsRes) RunError!void {
 
                             const res = try fSink.consume(.{
                                 .match = .{
-                                    .data = line[group.start..group.end],
                                     .line = line,
-                                    .groupN = @intCast(i),
+                                    .group = group,
+                                    .count = matchData.count,
+                                    .targetGroup = targetGroup,
                                 },
                             });
                             switch (res) {
                                 .lineConsumed => break :lineFeed,
-                                .eventSkipped, .eventConsumed => {
+                                // NOTE: start is not updated in this case because group
+                                // was cached to do some activities between previous and new
+                                // group
+                                .eventCached,
+                                => {},
+                                .eventUncached,
+                                => |lastIndex| {
+                                    start = lastIndex;
+                                },
+                                .eventSkipped,
+                                .eventConsumed,
+                                => {
+                                    // TODO: when considering group0 for a soft-match, we cant update start like this
                                     start = group.end;
                                 },
                             }
