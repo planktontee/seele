@@ -183,12 +183,21 @@ pub const Args = struct {
     };
 
     pub fn targetGroup(self: *const @This(), max: usize) TargetGroupError!TargetGroup {
+        // NOTE: we try to reduce to group0 as much as we can
         if (self.groups) |groups| {
-            for (groups) |group| if (group + 1 > max) return TargetGroupError.InvalidTargetGroup;
+            if (groups.len == 0) return TargetGroupError.InvalidTargetGroup;
+
+            if (groups[0] + 1 > max) return TargetGroupError.InvalidTargetGroup;
+            if (groups[0] == 0) return .{ .fixed = .{} };
             if (groups.len > 1) {
                 // TODO: sort on parse
-                for (1..groups.len) |i| if (groups[i] < groups[i - 1]) return TargetGroupError.TargetGroupsNotSorted;
+                for (groups[1..], 1..groups.len) |item, i| {
+                    if (item == 0) return .{ .fixed = .{} };
+                    if (item + 1 > max) return TargetGroupError.InvalidTargetGroup;
+                    if (item < groups[i - 1]) return TargetGroupError.TargetGroupsNotSorted;
+                }
             }
+
             return .{ .linearIter = .{ .arr = groups } };
         } else {
             if (self.@"group-highlight" and max > 1) {

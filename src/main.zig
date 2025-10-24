@@ -234,9 +234,9 @@ pub fn run(argsRes: *const args.ArgsRes) RunError!void {
                                 // NOTE: start is not updated in this case because group
                                 // was cached to do some activities between previous and new
                                 // group
-                                .eventCached,
+                                .eventPostponed,
                                 => {},
-                                .eventUncached,
+                                .eventPostponedFinished,
                                 => |lastIndex| {
                                     start = lastIndex;
                                 },

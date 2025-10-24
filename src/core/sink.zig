@@ -46,6 +46,7 @@ pub fn pickSinkBuffer(fDetailed: *const fs.DetailedFile, eventHandler: EventHand
 }
 
 pub const ColorPicker = struct {
+    comptime colorPattern: ColorPattern = .escape,
     trueColor: bool,
     config: std.Io.tty.Config,
     state: State = .reset,
@@ -68,6 +69,25 @@ pub const ColorPicker = struct {
         }
     };
 
+    pub const ColorPattern = enum {
+        rainbow,
+        escape,
+
+        pub fn pick(comptime self: @This(), offset: u16) []const u8 {
+            return (switch (self) {
+                .rainbow => RainbowColor,
+                .escape => EscapeColor,
+            }).pick(offset);
+        }
+
+        pub fn reset(comptime self: @This()) []const u8 {
+            return (switch (self) {
+                .rainbow => RainbowColor,
+                .escape => EscapeColor,
+            }).resetCode();
+        }
+    };
+
     pub fn init(file: File) @This() {
         const config = std.Io.tty.Config.detect(file);
         return .{
@@ -85,12 +105,13 @@ pub const ColorPicker = struct {
         return false;
     }
 
-    pub fn reset(self: *@This(), w: *Writer) std.Io.tty.Config.SetColorError!void {
-        if (self.config == .no_color) return;
+    pub fn reset(self: *@This()) []const u8 {
+        if (self.config == .no_color) return "";
         if (!self.state.eql(.reset)) {
-            try w.writeAll(EscapeColor.reset.escapeCode());
             self.state = .reset;
+            return EscapeColor.reset.escapeCode();
         }
+        return "";
     }
 
     pub const RGB = struct {
@@ -133,23 +154,29 @@ pub const ColorPicker = struct {
         }
     };
 
-    pub fn rainbowPick(offset: u16) []const u8 {
-        const bucketIndex: u8 = @intCast(offset % 11);
-        return @as(*const RGB, switch (bucketIndex) {
-            0 => .from("#EF0000"),
-            1 => .from("#FA8072"),
-            2 => .from("#FFA500"),
-            3 => .from("#FFFF00"),
-            4 => .from("#B0FF00"),
-            5 => .from("#00EF00"),
-            6 => .from("#00EF80"),
-            7 => .from("#99D9EA"),
-            8 => .from("#0000EF"),
-            9 => .from("#8F00FF"),
-            10 => .from("#9400D3"),
-            else => unreachable,
-        }).escapeCode;
-    }
+    pub const RainbowColor = struct {
+        pub fn pick(offset: u16) []const u8 {
+            const bucketIndex: u8 = @intCast(offset % 11);
+            return @as(*const RGB, switch (bucketIndex) {
+                0 => .from("#EF0000"),
+                1 => .from("#FA8072"),
+                2 => .from("#FFA500"),
+                3 => .from("#FFFF00"),
+                4 => .from("#B0FF00"),
+                5 => .from("#00EF00"),
+                6 => .from("#00EF80"),
+                7 => .from("#99D9EA"),
+                8 => .from("#0000EF"),
+                9 => .from("#8F00FF"),
+                10 => .from("#9400D3"),
+                else => unreachable,
+            }).escapeCode;
+        }
+
+        pub fn resetCode() []const u8 {
+            return EscapeColor.reset.escapeCode();
+        }
+    };
 
     pub const EscapeColor = enum {
         boldRed,
@@ -175,39 +202,41 @@ pub const ColorPicker = struct {
                 .reset => "\x1b[0m",
             };
         }
+
+        pub fn pick(offset: u16) []const u8 {
+            // We are ignoring bold black, white and reset
+            const bucketIndex: u8 = @intCast(offset % 6);
+            const color: EscapeColor = @enumFromInt(bucketIndex);
+            std.debug.assert(color != .reset);
+            return color.escapeCode();
+        }
+
+        pub fn resetCode() []const u8 {
+            return EscapeColor.reset.escapeCode();
+        }
     };
-
-    pub fn pickEscapeColor(offset: u16) []const u8 {
-        // We are ignoring bold black, white and reset
-        const bucketIndex: u8 = @intCast(offset % 6);
-        const color: EscapeColor = @enumFromInt(bucketIndex);
-        std.debug.assert(color != .reset);
-        return color.escapeCode();
-    }
-
-    pub fn pickColor(offset: u16) []const u8 {
-        return pickEscapeColor(offset);
-    }
 
     fn useConfigColoring(self: *const @This()) bool {
         return (self.config == .escape_codes and !self.trueColor) or
             self.config == .windows_api;
     }
 
-    pub fn setColor(self: *@This(), w: *Writer, offset: u16) std.Io.tty.Config.SetColorError!void {
-        if (self.config == .no_color) return;
+    pub fn pickColor(self: *@This(), offset: u16) []const u8 {
+        if (self.config == .no_color) return "";
         if (self.useConfigColoring()) {
             const target: State = .{ .color = 0 };
             if (!self.state.eql(target)) {
-                try w.writeAll(EscapeColor.boldRed.escapeCode());
                 self.state = target;
+                return EscapeColor.boldRed.escapeCode();
             }
+            return "";
         } else {
             const target: State = .{ .color = offset };
             if (!self.state.eql(target)) {
-                try w.writeAll(pickColor(offset));
                 self.state = target;
+                return self.colorPattern.pick(offset);
             }
+            return "";
         }
     }
 };
@@ -368,34 +397,6 @@ pub const Sink = struct {
         };
     }
 
-    // TODO: move to buffer return
-    pub fn sendColor(
-        self: *@This(),
-        colorPicker: *ColorPicker,
-        offset: u16,
-    ) std.Io.tty.Config.SetColorError!void {
-        switch (self.sinkWriter) {
-            .growing => |w| try colorPicker.setColor(w.writer(), offset),
-            .buffered,
-            .directWrite,
-            => |*w| try colorPicker.setColor(&w.interface, offset),
-        }
-    }
-
-    // TODO: move to buffer return
-    pub fn sendResetColor(
-        self: *@This(),
-        colorPicker: *ColorPicker,
-    ) std.Io.tty.Config.SetColorError!void {
-        switch (self.sinkWriter) {
-            .growing => |w| try colorPicker.reset(w.writer()),
-            .buffered,
-            .directWrite,
-            => |*w| try colorPicker.reset(&w.interface),
-        }
-    }
-
-    // TODO: move colored versions to writeVecAll
     pub fn writeAll(self: *@This(), data: []const u8) Writer.Error!void {
         switch (self.sinkWriter) {
             .growing,
@@ -469,8 +470,8 @@ pub const Sink = struct {
     pub const ConsumeResponse = union(enum) {
         eventSkipped,
         eventConsumed,
-        eventCached,
-        eventUncached: usize,
+        eventPostponed,
+        eventPostponedFinished: usize,
         lineConsumed,
     };
 
@@ -479,22 +480,26 @@ pub const Sink = struct {
             .colorMatch => |*colorPicker| {
                 switch (event) {
                     .match => |matchEvent| {
-                        try self.sendColor(
+                        var cChunks = ColoredChunks(2).init(
                             colorPicker,
                             @intCast(matchEvent.group.n),
                         );
-                        try self.writeAll(matchEvent.group.slice(matchEvent.line));
+                        cChunks.coloredChunk(matchEvent.group.slice(matchEvent.line));
+                        try self.writeVecAll(&cChunks.chunks);
                         return .eventConsumed;
                     },
                     .beforeMatch,
                     .noMatchEndOfLineAfterMatch,
                     => |data| {
-                        try self.sendResetColor(colorPicker);
-                        try self.writeAll(data);
+                        var cChunks = ColoredChunks(2).init(
+                            colorPicker,
+                            @intCast(0),
+                        );
+                        cChunks.clearChunk(data);
+                        try self.writeVecAll(&cChunks.chunks);
                         return .eventConsumed;
                     },
                     .noMatchEndOfLine => {
-                        try self.sendResetColor(colorPicker);
                         return .eventSkipped;
                     },
                     .endOfLine => {
@@ -502,7 +507,7 @@ pub const Sink = struct {
                         return .eventConsumed;
                     },
                     .endOfFile => {
-                        try self.sendResetColor(colorPicker);
+                        try self.writeAll(colorPicker.reset());
                         try self.sink();
                         return .eventConsumed;
                     },
@@ -519,21 +524,18 @@ pub const Sink = struct {
                             groupTracker.cursor = matchEvent.group.start;
                             groupTracker.group0 = matchEvent.group;
 
-                            if (groupTracker.groupHighlight and matchEvent.targetGroup.anyOtherThan(0))
-                                return .eventCached;
+                            if (groupTracker.groupHighlight and matchEvent.targetGroup.anyOtherThan(0)) {
+                                return .eventPostponed;
+                            }
 
-                            var cChunks = try ColoredChunks(4).init(
+                            var cChunks = ColoredChunks(4).init(
                                 &groupTracker.colorPicker,
                                 @intCast(matchEvent.group.n),
                             );
 
-                            const slice = matchEvent.group.slice(matchEvent.line);
-                            cChunks.addAndColor(slice);
-                            cChunks.add(rv: {
-                                break :rv if (slice.len > 0 and slice[slice.len - 1] != '\n') "\n" else "";
-                            });
+                            cChunks.coloredChunk(matchEvent.group.slice(matchEvent.line));
+                            cChunks.breakline();
                             try self.writeVecAll(&cChunks.chunks);
-                            cChunks.updatePicker(&groupTracker.colorPicker);
 
                             return .eventConsumed;
                         } else {
@@ -543,8 +545,10 @@ pub const Sink = struct {
                             const line = matchEvent.line;
                             const group = matchEvent.group;
                             const cursor = groupTracker.cursor;
-                            const hasMoreGroups = matchEvent.targetGroup.anyOtherThan(group.n);
-                            var cChunks = try ColoredChunks(8).init(
+                            const endChunk = !matchEvent.targetGroup.anyOtherThan(group.n) or
+                                matchEvent.count - 1 == group.n;
+
+                            var cChunks = ColoredChunks(8).init(
                                 &groupTracker.colorPicker,
                                 @intCast(group.n),
                             );
@@ -554,34 +558,29 @@ pub const Sink = struct {
                             // <match color (if needed)> <match>
                             // <reset color (if needed)> <post match if and and last group>
                             // <breakline> (if needed)
-                            cChunks.addAndReset(rv: {
-                                if (cursor < group.start) {
-                                    break :rv line[cursor..group.start];
-                                } else break :rv "";
-                            });
-                            const slice = group.slice(line);
-                            cChunks.addAndColor(slice);
-                            cChunks.addAndReset(rv: {
-                                if (matchEvent.count - 1 == group.n or !hasMoreGroups) {
-                                    break :rv line[group.end..group0.end];
-                                } else break :rv "";
-                            });
-                            cChunks.add(rv: {
-                                break :rv if (group.end == group0.end or
-                                    (matchEvent.count - 1 == group.n or !hasMoreGroups) and
-                                        slice.len > 0 and
-                                        slice[slice.len - 1] != '\n') "\n" else "";
-                            });
+                            if (cursor < group.start) {
+                                cChunks.clearChunk(line[cursor..group.start]);
+                            } else cChunks.skipChunk();
+
+                            cChunks.coloredChunk(group.slice(line));
+
+                            if (endChunk and group.end != group0.end) {
+                                cChunks.clearChunk(line[group.end..group0.end]);
+                                groupTracker.cursor = group0.end;
+                            } else {
+                                groupTracker.cursor = group.end;
+                                cChunks.skipChunk();
+                            }
+
+                            if (groupTracker.cursor == group0.end) {
+                                cChunks.breakline();
+                            } else cChunks.skipChunk();
 
                             try self.writeVecAll(&cChunks.chunks);
-                            cChunks.updatePicker(&groupTracker.colorPicker);
 
-                            groupTracker.cursor = group.end;
-                            if (matchEvent.count - 1 == group.n or !hasMoreGroups) {
-                                return .{ .eventUncached = group0.end };
-                            } else {
-                                return .eventConsumed;
-                            }
+                            if (endChunk) {
+                                return .{ .eventPostponedFinished = group0.end };
+                            } else return .eventConsumed;
                         }
                     },
                     .endOfLine => {
@@ -591,7 +590,7 @@ pub const Sink = struct {
                         return .eventConsumed;
                     },
                     .endOfFile => {
-                        try self.sendResetColor(&groupTracker.colorPicker);
+                        try self.writeAll(groupTracker.colorPicker.reset());
                         try self.sink();
                         groupTracker.cursor = 0;
                         groupTracker.group0 = null;
@@ -646,56 +645,26 @@ pub const Sink = struct {
 // TODO: can this be moved inside ColorPicker?
 pub fn ColoredChunks(comptime size: usize) type {
     return struct {
-        reset: [4]u8 = undefined,
-        resetEnd: usize = 0,
-        colored: [19]u8 = undefined,
-        coloredEnd: usize = 0,
         colorOffset: u16 = undefined,
         chunks: [size][]const u8 = undefined,
         at: usize = 0,
-        state: ColorPicker.State = undefined,
+        colorPicker: *ColorPicker = undefined,
 
-        pub fn init(colorPicker: *ColorPicker, offset: u16) std.Io.tty.Config.SetColorError!@This() {
+        pub fn init(colorPicker: *ColorPicker, offset: u16) @This() {
             std.debug.assert(colorPicker.trueColor);
             var self: @This() = .{};
 
-            const currState = colorPicker.state;
-
-            // NOTE:
-            // we are resetting colorPick state to ensure we write what's reset and whats
-            // colored for this offset
-            // slices are not stored because we later copy this struct to return it
-            colorPicker.state = .{ .color = offset };
-            var colorWriter: Writer = .fixed(&self.reset);
-            try colorPicker.reset(&colorWriter);
-            std.debug.assert(colorWriter.end != 0);
-            self.resetEnd = colorWriter.end;
-
-            colorPicker.state = .reset;
-            colorWriter = .fixed(&self.colored);
-            try colorPicker.setColor(&colorWriter, offset);
-            std.debug.assert(colorWriter.end != 0);
-            self.coloredEnd = colorWriter.end;
-
-            colorPicker.state = currState;
-            self.state = currState;
+            self.colorPicker = colorPicker;
             self.colorOffset = offset;
 
             return self;
         }
 
-        pub fn addAndReset(self: *@This(), chunk: []const u8) void {
+        pub fn clearChunk(self: *@This(), chunk: []const u8) void {
             std.debug.assert(self.at + 2 <= self.chunks.len);
             if (chunk.len > 0) {
-                self.chunks[self.at] = rv: {
-                    if (self.state.eql(.reset)) {
-                        break :rv "";
-                    } else {
-                        break :rv self.reset[0..self.resetEnd];
-                    }
-                };
+                self.chunks[self.at] = self.colorPicker.reset();
                 self.chunks[self.at + 1] = chunk;
-                self.state = .reset;
             } else {
                 self.chunks[self.at] = "";
                 self.chunks[self.at + 1] = "";
@@ -703,24 +672,37 @@ pub fn ColoredChunks(comptime size: usize) type {
             self.at += 2;
         }
 
-        pub fn addAndColor(self: *@This(), chunk: []const u8) void {
+        pub fn coloredChunk(self: *@This(), chunk: []const u8) void {
             std.debug.assert(self.at + 2 <= self.chunks.len);
             if (chunk.len > 0) {
-                const target: ColorPicker.State = .{ .color = self.colorOffset };
-                self.chunks[self.at] = rv: {
-                    if (self.state.eql(target)) {
-                        break :rv "";
-                    } else {
-                        self.state = target;
-                        break :rv self.colored[0..self.coloredEnd];
-                    }
-                };
+                self.chunks[self.at] = self.colorPicker.pickColor(self.colorOffset);
                 self.chunks[self.at + 1] = chunk;
             } else {
                 self.chunks[self.at] = "";
                 self.chunks[self.at + 1] = "";
             }
             self.at += 2;
+        }
+
+        pub fn skipChunk(self: *@This()) void {
+            std.debug.assert(self.at + 2 <= self.chunks.len);
+            self.chunks[self.at] = "";
+            self.chunks[self.at + 1] = "";
+            self.at += 2;
+        }
+
+        // crawls all chunks to see if there's a breakline already in there before all
+        // skipped chunks
+        pub fn breakline(self: *@This()) void {
+            std.debug.assert(self.at + 2 == size);
+            var chunk = size - 3;
+            while (chunk > 0) : (chunk -|= 2) {
+                const last = self.chunks[chunk];
+                if (last.len == 0) continue;
+
+                self.add(if (last.len > 0 and last[last.len - 1] != '\n') "\n" else "");
+                return;
+            }
         }
 
         pub fn add(self: *@This(), chunk: []const u8) void {
@@ -728,10 +710,6 @@ pub fn ColoredChunks(comptime size: usize) type {
             self.chunks[self.at] = "";
             self.chunks[self.at + 1] = chunk;
             self.at += 2;
-        }
-
-        pub fn updatePicker(self: *@This(), colorPicker: *ColorPicker) void {
-            colorPicker.state = self.state;
         }
     };
 }
