@@ -29,8 +29,13 @@ pub fn main() !u8 {
         break :rv &r;
     };
 
-    var sfba = std.heap.stackFallback(4098, std.heap.page_allocator);
-    const allocator = sfba.get();
+    // var sfba = std.heap.stackFallback(4098, std.heap.page_allocator);
+    // const allocator = sfba.get();
+    // NOTE: this is completely arbitrary and currently set to no fallback for
+    // testing purposes
+    var buff: [1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buff);
+    const allocator = fba.allocator();
 
     var result: args.ArgsRes = .init(allocator);
     defer result.deinit();

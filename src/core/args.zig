@@ -13,16 +13,239 @@ const SpecResponseWithConfig = spec.SpecResponseWithConfig;
 const positionals = args.positionals;
 const fs = @import("fs.zig");
 
+const DefaultCodec = args.codec.ArgCodec(Args);
+const CursorT = zpec.collections.Cursor([]const u8);
+
+pub const ArgsCodec = struct {
+    defaultCodec: DefaultCodec = .{},
+
+    pub const Error = error{
+        InvalidRangeToken,
+        UnexpectedRangeTokenEnd,
+        LinearItemsNotSorted,
+        InvalidRange,
+        RangesOverlap,
+        LinearItemOverlapsWithRange,
+        EmptyTargetGroups,
+    } || DefaultCodec.Error;
+
+    pub fn supports(
+        comptime T: type,
+        comptime tag: DefaultCodec.SpecFieldEnum,
+    ) bool {
+        return tag == .groups and T == []const TargetGroup;
+    }
+
+    pub fn parseByType(
+        self: *@This(),
+        comptime T: type,
+        comptime tag: DefaultCodec.SpecFieldEnum,
+        allocator: *const std.mem.Allocator,
+        cursor: *CursorT,
+    ) Error!T {
+        if (comptime !supports(T, tag)) {
+            return try self.defaultCodec.parseByType(T, tag, allocator, cursor);
+        }
+
+        if (comptime T != []const TargetGroup or tag != .groups) @compileError("Unsupported type in custom codec");
+
+        return try self.parseGroups(allocator, cursor);
+    }
+
+    pub fn parseGroups(
+        _: *@This(),
+        allocator: *const std.mem.Allocator,
+        cursor: *CursorT,
+    ) Error![]const TargetGroup {
+        const arr = try args.codec.PrimitiveCodec.parseArray(
+            &args.codec.PrimitiveCodec{},
+            []const []const u8,
+            .null,
+            allocator,
+            cursor,
+        );
+        defer allocator.free(arr);
+
+        var linearIterTargets = try std.ArrayListUnmanaged(u16).initCapacity(allocator.*, 3);
+        errdefer linearIterTargets.deinit(allocator.*);
+        var targets = try std.ArrayListUnmanaged(TargetGroup).initCapacity(allocator.*, 3);
+        errdefer targets.deinit(allocator.*);
+
+        const State = enum {
+            none,
+            digit0,
+            number,
+            range1,
+            range2,
+            numberAfterRange,
+        };
+
+        var state: State = .none;
+
+        for (arr) |item| {
+            var start: u16 = 0;
+            var end: u16 = 0;
+            var n2: usize = 0;
+            var i: usize = 0;
+            stateLoop: while (true) {
+                switch (state) {
+                    .none => {
+                        if (i >= item.len) break;
+                        switch (item[i]) {
+                            '0' => {
+                                state = .digit0;
+                                i += 1;
+                                continue :stateLoop;
+                            },
+                            '1'...'9' => {
+                                state = .number;
+                                i += 1;
+                                continue :stateLoop;
+                            },
+                            else => return std.fmt.ParseIntError.InvalidCharacter,
+                        }
+                    },
+                    .digit0 => {
+                        if (i >= item.len) {
+                            start = 0;
+                            state = .number;
+                            break;
+                        }
+                        switch (item[i]) {
+                            '.' => {
+                                start = 0;
+                                i += 1;
+                                state = .range1;
+                                continue :stateLoop;
+                            },
+                            else => return Error.InvalidRangeToken,
+                        }
+                    },
+                    .number => {
+                        while (i < item.len) : (i += 1) {
+                            switch (item[i]) {
+                                '0'...'9' => continue,
+                                '.' => {
+                                    start = try std.fmt.parseInt(u16, item[0..i], 10);
+                                    i += 1;
+                                    state = .range1;
+                                    continue :stateLoop;
+                                },
+                                else => return std.fmt.ParseIntError.InvalidCharacter,
+                            }
+                        }
+                        start = try std.fmt.parseInt(u16, item[0..i], 10);
+                        break;
+                    },
+                    .range1 => {
+                        if (i >= item.len) return Error.UnexpectedEndOfInput;
+                        switch (item[i]) {
+                            '.' => {
+                                i += 1;
+                                state = .range2;
+                                continue :stateLoop;
+                            },
+                            else => return Error.InvalidRangeToken,
+                        }
+                    },
+                    .range2 => {
+                        if (i >= item.len) return Error.UnexpectedEndOfInput;
+                        switch (item[i]) {
+                            '1'...'9' => {
+                                n2 = i;
+                                i += 1;
+                                state = .numberAfterRange;
+                                continue :stateLoop;
+                            },
+                            else => return std.fmt.ParseIntError.InvalidCharacter,
+                        }
+                    },
+                    .numberAfterRange => {
+                        while (i < item.len) : (i += 1) {
+                            switch (item[i]) {
+                                '0'...'9' => {
+                                    continue;
+                                },
+                                else => return std.fmt.ParseIntError.InvalidCharacter,
+                            }
+                        }
+                        end = try std.fmt.parseInt(u16, item[n2..i], 10);
+                        break :stateLoop;
+                    },
+                }
+            }
+
+            switch (state) {
+                .number => {
+                    if (linearIterTargets.items.len == 0) {
+                        try linearIterTargets.append(allocator.*, start);
+                    } else {
+                        const last = linearIterTargets.items[linearIterTargets.items.len - 1];
+                        if (last >= start) return Error.LinearItemsNotSorted;
+                        try linearIterTargets.append(allocator.*, start);
+                    }
+                },
+                .numberAfterRange => {
+                    if (start >= end) return Error.InvalidRange;
+                    if (targets.items.len == 0) {
+                        try targets.append(
+                            allocator.*,
+                            .{ .range = .{ .start = start, .end = end } },
+                        );
+                    } else {
+                        const last = targets.items[targets.items.len - 1];
+                        switch (last) {
+                            .range => |range| {
+                                if (range.includes(start) or range.includes(end)) return Error.RangesOverlap;
+                                try targets.append(
+                                    allocator.*,
+                                    .{ .range = .{ .start = start, .end = end } },
+                                );
+                            },
+                            else => unreachable,
+                        }
+                    }
+                },
+                else => return Error.UnexpectedEndOfInput,
+            }
+
+            state = .none;
+        }
+
+        if (linearIterTargets.items.len > 0) {
+            const linearItems = try linearIterTargets.toOwnedSlice(allocator.*);
+            for (targets.items) |target| {
+                switch (target) {
+                    .range => |range| {
+                        for (linearItems) |item| {
+                            if (range.includes(item)) return Error.LinearItemOverlapsWithRange;
+                        }
+                    },
+                    else => unreachable,
+                }
+            }
+
+            try targets.append(allocator.*, .{
+                .linearIter = .{ .arr = linearItems },
+            });
+        } else {
+            linearIterTargets.deinit(allocator.*);
+        }
+
+        if (targets.items.len <= 0) return Error.EmptyTargetGroups;
+
+        return try targets.toOwnedSlice(allocator.*);
+    }
+};
+
 pub const Args = struct {
     @"line-by-line": bool = true,
     @"invert-match": bool = false,
     @"match-only": bool = false,
 
-    // NOTE: default max group num
-    // TODO: reintroduce bracket-less 1d arrays
-    // TODO: expand tokenizer further to parse TargetGroup
-    // TODO: Allow ranges
-    groups: ?[]const u16 = null,
+    groups: []const TargetGroup = &.{
+        .{ .linearIter = .{ .arr = &.{0} } },
+    },
 
     multiline: bool = false,
     recursive: bool = false,
@@ -33,6 +256,8 @@ pub const Args = struct {
 
     verbose: bool = false,
     byteRanges: ?[]const []const usize = null,
+
+    pub const Codec = ArgsCodec;
 
     pub const Positionals = positionals.PositionalOf(.{
         .TupleType = struct { []const u8 },
@@ -182,41 +407,48 @@ pub const Args = struct {
         TargetGroupsNotSorted,
     };
 
-    pub fn targetGroup(self: *const @This(), max: usize) TargetGroupError!TargetGroup {
+    pub fn targetGroup(self: *const @This(), _: usize) TargetGroupError!TargetGroup {
+        // TODO: remake this logic and glue together group array
+
         // NOTE: we try to reduce to group0 as much as we can
-        if (self.groups) |groups| {
-            if (groups.len == 0) return TargetGroupError.InvalidTargetGroup;
-
-            if (groups[0] + 1 > max) return TargetGroupError.InvalidTargetGroup;
-            if (groups[0] == 0) return .{ .fixed = .{} };
-            if (groups.len > 1) {
-                // TODO: sort on parse
-                for (groups[1..], 1..groups.len) |item, i| {
-                    if (item == 0) return .{ .fixed = .{} };
-                    if (item + 1 > max) return TargetGroupError.InvalidTargetGroup;
-                    if (item < groups[i - 1]) return TargetGroupError.TargetGroupsNotSorted;
-                }
-            }
-
-            return .{ .linearIter = .{ .arr = groups } };
-        } else {
-            if (self.@"group-highlight" and max > 1) {
-                return .{ .range = .{} };
-            }
-            return .{ .fixed = .{} };
-        }
-    }
-};
-
-pub const FixedGroup = struct {
-    target: usize = 0,
-
-    pub fn includes(self: *const @This(), group: usize) bool {
-        return self.target == group;
-    }
-
-    pub fn anyOtherThan(_: *const @This(), _: usize) bool {
-        return false;
+        // if (self.groups) |groups| {
+        //     if (groups.len == 0) return TargetGroupError.InvalidTargetGroup;
+        //
+        //     if (groups[0] + 1 > max) return TargetGroupError.InvalidTargetGroup;
+        //     if (groups[0] == 0) return .{ .fixed = .{} };
+        //     if (groups.len > 1) {
+        //         // TODO: sort on parse
+        //         for (groups[1..], 1..groups.len) |item, i| {
+        //             if (item == 0) return .{ .fixed = .{} };
+        //             if (item + 1 > max) return TargetGroupError.InvalidTargetGroup;
+        //             if (item < groups[i - 1]) return TargetGroupError.TargetGroupsNotSorted;
+        //         }
+        //     }
+        //
+        //     return .{ .linearIter = .{ .arr = groups } };
+        // } else {
+        //     if (self.@"group-highlight" and max > 1) {
+        //         return .{ .range = .{} };
+        //     }
+        //     return .{ .fixed = .{} };
+        // }
+        // for (self.groups) |group| {
+        //     switch (group) {
+        //         .range => |range| {
+        //             std.debug.print(
+        //                 "Range {d}...{d}\n",
+        //                 .{ range.start, range.end },
+        //             );
+        //         },
+        //         .linearIter => |iter| {
+        //             std.debug.print(
+        //                 "LinearIter {d}: {any}\n",
+        //                 .{ iter.arr.len, iter.arr },
+        //             );
+        //         },
+        //     }
+        // }
+        return @as(TargetGroupError!TargetGroup, self.groups[0]);
     }
 };
 
@@ -250,7 +482,6 @@ pub const LinearGroup = struct {
 };
 
 pub const TargetGroup = union(enum) {
-    fixed: FixedGroup,
     range: RangeGroup,
     linearIter: LinearGroup,
 
