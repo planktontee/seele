@@ -61,6 +61,7 @@ test "arg cursor peek with stackItem" {
     try std.testing.expectEqualStrings("Hello", cursor.peek().?);
 }
 
+// TODO: move away from single quotes
 pub const AtDepthArrayTokenizer = struct {
     input: []const u8,
     cursor: usize = 0,
@@ -95,9 +96,11 @@ pub const AtDepthArrayTokenizer = struct {
     const State = enum {
         noop,
         findArrayStart,
+        phantom1dArray,
         value,
         arrayStart,
         postValue,
+        post1dValue,
         string,
         subArrayString,
         anyValue,
@@ -133,13 +136,33 @@ pub const AtDepthArrayTokenizer = struct {
             return Error.UnexpectedEndOfInput;
         }
         // Stacks are finished but there's a next token
-        if (self.stack == 0) return Error.SyntaxError;
+        if (self.stack == 0 and self.state != .post1dValue) return Error.SyntaxError;
         return false;
     }
 
     pub fn takeValueSlice(self: *@This()) []const u8 {
         const slice = self.input[self.valueStart..self.cursor];
         self.valueStart = self.cursor;
+        return slice;
+    }
+
+    // This relies on us skipping empty at start of match
+    pub fn takeValueSliceWithoutEmpty(self: *@This()) []const u8 {
+        const tmpCursor = self.cursor;
+        self.cursor -= 1;
+        while (self.cursor > 0) : (self.cursor -= 1) {
+            switch (self.input[self.cursor]) {
+                ' ', '\t' => continue,
+                else => {
+                    self.cursor += 1;
+                    break;
+                },
+            }
+        } else {
+            self.cursor += 1;
+        }
+        const slice = self.takeValueSlice();
+        self.cursor = tmpCursor;
         return slice;
     }
 
@@ -164,7 +187,14 @@ pub const AtDepthArrayTokenizer = struct {
                             self.state = .arrayStart;
                             continue :stateLoop;
                         },
-                        else => return Error.MissingArrayLayer,
+                        '\'', ']' => return Error.MissingArrayLayer,
+                        ',' => return Error.SyntaxError,
+                        else => {
+                            self.valueStart = self.cursor;
+                            self.cursor += 1;
+                            self.state = .phantom1dArray;
+                            continue :stateLoop;
+                        },
                     }
                 },
                 .value => {
@@ -205,6 +235,43 @@ pub const AtDepthArrayTokenizer = struct {
                             self.state = .value;
                             continue :stateLoop;
                         },
+                    }
+                },
+                .phantom1dArray => {
+                    while (self.cursor < self.input.len) : (self.cursor += 1) {
+                        switch (self.input[self.cursor]) {
+                            ',' => {
+                                // rewinding to remove empty to the right
+                                const slice = self.takeValueSliceWithoutEmpty();
+                                self.state = .post1dValue;
+                                return slice;
+                            },
+                            ']',
+                            '[',
+                            '\'',
+                            '\n',
+                            '\r',
+                            '"',
+                            => return Error.SyntaxError,
+                            else => continue,
+                        }
+                    }
+                    const slice = self.takeValueSliceWithoutEmpty();
+                    self.state = .post1dValue;
+                    return slice;
+                },
+                .post1dValue => {
+                    if (try self.skipWhiteEspaceCheckEnd()) return null;
+
+                    switch (try self.expectPeek()) {
+                        ',' => {
+                            self.cursor += 1;
+                            _ = try self.skipWhiteSpaceExpectByte();
+                            self.valueStart = self.cursor;
+                            self.state = .phantom1dArray;
+                            continue :stateLoop;
+                        },
+                        else => return Error.SyntaxError,
                     }
                 },
                 .postValue => {
@@ -343,23 +410,16 @@ test "Depth 1 Array tokenizer (non-string)" {
     try t.expectError(E.MissingArrayLayer, tstCollectTokens(allocator, "]\t"));
     try t.expectError(E.MissingArrayLayer, tstCollectTokens(allocator, "\t]\t"));
     try t.expectError(E.MissingArrayLayer, tstCollectTokens(allocator, " \t] \t "));
-    try t.expectError(E.MissingArrayLayer, tstCollectTokens(allocator, "1"));
-    try t.expectError(E.MissingArrayLayer, tstCollectTokens(allocator, " 1 "));
-    try t.expectError(E.MissingArrayLayer, tstCollectTokens(allocator, "\t1\t"));
 
-    try t.expectError(E.MissingArrayLayer, tstCollectTokens(allocator, "1,2"));
-    try t.expectError(E.MissingArrayLayer, tstCollectTokens(allocator, "1, 2"));
-    try t.expectError(E.MissingArrayLayer, tstCollectTokens(allocator, " 1 , 2 "));
-    try t.expectError(E.MissingArrayLayer, tstCollectTokens(allocator, "\t1,\t2\t"));
-
-    try t.expectError(E.MissingArrayLayer, tstCollectTokens(allocator, ","));
-    try t.expectError(E.MissingArrayLayer, tstCollectTokens(allocator, " ,"));
-    try t.expectError(E.MissingArrayLayer, tstCollectTokens(allocator, ", "));
-    try t.expectError(E.MissingArrayLayer, tstCollectTokens(allocator, " , "));
-    try t.expectError(E.MissingArrayLayer, tstCollectTokens(allocator, "\t,\t"));
-    try t.expectError(E.MissingArrayLayer, tstCollectTokens(allocator, " \t,"));
-    try t.expectError(E.MissingArrayLayer, tstCollectTokens(allocator, ",\t "));
-    try t.expectError(E.MissingArrayLayer, tstCollectTokens(allocator, " \t, \t "));
+    try t.expectError(E.SyntaxError, tstCollectTokens(allocator, ","));
+    try t.expectError(E.SyntaxError, tstCollectTokens(allocator, " ,"));
+    try t.expectError(E.SyntaxError, tstCollectTokens(allocator, ", "));
+    try t.expectError(E.SyntaxError, tstCollectTokens(allocator, " , "));
+    try t.expectError(E.SyntaxError, tstCollectTokens(allocator, "\t,\t"));
+    try t.expectError(E.SyntaxError, tstCollectTokens(allocator, " \t,"));
+    try t.expectError(E.SyntaxError, tstCollectTokens(allocator, ",\t "));
+    try t.expectError(E.SyntaxError, tstCollectTokens(allocator, " \t, \t "));
+    try t.expectError(E.SyntaxError, tstCollectTokens(allocator, ",1"));
 
     const expectEmpty: []const []const u8 = &.{};
     try t.expectEqualDeep(expectEmpty, try tstCollectTokens(allocator, ""));
@@ -396,7 +456,9 @@ test "Depth 1 Array tokenizer (non-string)" {
     try t.expectError(E.UnexpectedEndOfInput, tstCollectTokens(allocator, "[1, "));
     try t.expectError(E.UnexpectedEndOfInput, tstCollectTokens(allocator, "\t[1,"));
     try t.expectError(E.UnexpectedEndOfInput, tstCollectTokens(allocator, "[1,\t"));
+    try t.expectError(E.UnexpectedEndOfInput, tstCollectTokens(allocator, "1,"));
 
+    try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "[1,]"));
     try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "[1, ]"));
     try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "[1,  ]"));
     try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "[1,\t]"));
@@ -460,6 +522,9 @@ test "Depth 1 Array tokenizer (non-string)" {
     try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, "[1]\t"));
     try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, "\t[1]\t"));
     try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, " \t[1]\t "));
+    try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, "1"));
+    try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, " 1 "));
+    try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, "\t1\t"));
 
     const expectTwo: []const []const u8 = &.{ "1", "1" };
     try t.expectEqualDeep(expectTwo, try tstCollectTokens(allocator, "[1,1]"));
@@ -484,6 +549,10 @@ test "Depth 1 Array tokenizer (non-string)" {
     try t.expectEqualDeep(expectTwo, try tstCollectTokens(allocator, "[1,1]\t"));
     try t.expectEqualDeep(expectTwo, try tstCollectTokens(allocator, "\t[1,1]\t"));
     try t.expectEqualDeep(expectTwo, try tstCollectTokens(allocator, " \t[1,1]\t "));
+    try t.expectEqualDeep(expectTwo, try tstCollectTokens(allocator, "1,1"));
+    try t.expectEqualDeep(expectTwo, try tstCollectTokens(allocator, "1, 1"));
+    try t.expectEqualDeep(expectTwo, try tstCollectTokens(allocator, " 1 , 1 "));
+    try t.expectEqualDeep(expectTwo, try tstCollectTokens(allocator, "\t1,\t1\t"));
 }
 
 test "Depth 2+ Array tokenizer (non-string)" {
@@ -599,7 +668,7 @@ test "Depth 2+ Array tokenizer (non-string)" {
     try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "[1, [3, 4], , 2, [[4], 4]]"));
     try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "[1,, [3, 4], 2, [[4], 4]]"));
     try t.expectError(E.SyntaxError, tstCollectTokens(allocator, "[1, [3, 4], 2, [[4], 4]]]"));
-    try t.expectError(E.MissingArrayLayer, tstCollectTokens(allocator, "1, [3, 4], 2, [[4], 4]"));
+    try t.expectError(E.SyntaxError, tstCollectTokens(allocator, "1, [3, 4], 2, [[4], 4]"));
 }
 
 test "Depth 1 Array tokenizer (strings)" {
