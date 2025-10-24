@@ -134,7 +134,6 @@ pub const RunError = error{} ||
     source.SourceReader.InitError ||
     source.ReadEvent.Error ||
     sink.Sink.ConsumeError ||
-    std.Io.tty.Config.SetColorError ||
     std.Io.Reader.DelimiterError ||
     std.Io.Writer.Error;
 

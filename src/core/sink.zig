@@ -45,10 +45,121 @@ pub fn pickSinkBuffer(fDetailed: *const fs.DetailedFile, eventHandler: EventHand
     unreachable;
 }
 
+pub const NoColor = struct {
+    pub fn pick() []const u8 {
+        return "";
+    }
+
+    pub fn resetCode() []const u8 {
+        return "";
+    }
+};
+
+pub const RGB = struct {
+    escapeCode: []const u8,
+
+    pub fn from(comptime hex: []const u8) *const @This() {
+        comptime if (hex.len != 7 or hex[0] != '#') @compileError(
+            std.fmt.comptimePrint("Hex [{s}] given isnt RGB\n", .{hex}),
+        );
+
+        comptime for (hex[1..]) |byte| {
+            switch (byte) {
+                '0'...'9',
+                'A'...'F',
+                'a'...'f',
+                => continue,
+                else => @compileError(
+                    std.fmt.comptimePrint("Bad byte for RGB in [{s}] - {x}\n", .{ hex, byte }),
+                ),
+            }
+        };
+
+        return comptime &.{ .escapeCode = std.fmt.comptimePrint(
+            "\x1b[38;2;{s};{s};{s}m",
+            .{
+                hexStrToDecStr(hex[1..3]),
+                hexStrToDecStr(hex[3..5]),
+                hexStrToDecStr(hex[5..7]),
+            },
+        ) };
+    }
+
+    fn hexStrToDecStr(slice: []const u8) []const u8 {
+        return comptime std.fmt.comptimePrint(
+            "{d}",
+            .{std.fmt.parseInt(u8, slice, 16) catch @compileError(
+                std.fmt.comptimePrint("Input not a hex num [{s}]\n", .{slice}),
+            )},
+        );
+    }
+};
+
+pub const RainbowColor = struct {
+    pub fn pick(offset: u16) []const u8 {
+        const bucketIndex: u8 = @intCast(offset % 11);
+        return @as(*const RGB, switch (bucketIndex) {
+            0 => .from("#EF0000"),
+            1 => .from("#FA8072"),
+            2 => .from("#FFA500"),
+            3 => .from("#FFFF00"),
+            4 => .from("#B0FF00"),
+            5 => .from("#00EF00"),
+            6 => .from("#00EF80"),
+            7 => .from("#99D9EA"),
+            8 => .from("#0000EF"),
+            9 => .from("#8F00FF"),
+            10 => .from("#9400D3"),
+            else => unreachable,
+        }).escapeCode;
+    }
+
+    pub fn resetCode() []const u8 {
+        return EscapeColor.reset.escapeCode();
+    }
+};
+
+pub const EscapeColor = enum {
+    boldRed,
+    boldGreen,
+    boldYellow,
+    boldBlue,
+    boldMagenta,
+    boldCyan,
+    boldBlack,
+    boldWhite,
+    reset,
+
+    pub fn escapeCode(self: @This()) []const u8 {
+        return switch (self) {
+            .boldRed => "\x1b[1;31m",
+            .boldGreen => "\x1b[1;32m",
+            .boldYellow => "\x1b[1;33m",
+            .boldBlue => "\x1b[1;34m",
+            .boldMagenta => "\x1b[1;35m",
+            .boldCyan => "\x1b[1;36m",
+            .boldBlack => "\x1b[1;30m",
+            .boldWhite => "\x1b[1;37m",
+            .reset => "\x1b[0m",
+        };
+    }
+
+    pub fn pick(offset: u16) []const u8 {
+        // We are ignoring bold black, white and reset
+        const bucketIndex: u8 = @intCast(offset % 6);
+        const color: EscapeColor = @enumFromInt(bucketIndex);
+        std.debug.assert(color != .reset);
+        return color.escapeCode();
+    }
+
+    pub fn resetCode() []const u8 {
+        return EscapeColor.reset.escapeCode();
+    }
+};
+
 pub const ColorPicker = struct {
-    comptime colorPattern: ColorPattern = .escape,
+    colorPattern: ColorPattern = .escape,
     trueColor: bool,
-    config: std.Io.tty.Config,
     state: State = .reset,
 
     pub const State = union(enum) {
@@ -72,32 +183,34 @@ pub const ColorPicker = struct {
     pub const ColorPattern = enum {
         rainbow,
         escape,
+        noColor,
 
-        pub fn pick(comptime self: @This(), offset: u16) []const u8 {
-            return (switch (self) {
-                .rainbow => RainbowColor,
-                .escape => EscapeColor,
-            }).pick(offset);
+        pub fn pick(self: @This(), offset: u16) []const u8 {
+            return switch (self) {
+                .rainbow => RainbowColor.pick(offset),
+                .escape => EscapeColor.pick(offset),
+                .noColor => NoColor.pick(),
+            };
         }
 
-        pub fn reset(comptime self: @This()) []const u8 {
-            return (switch (self) {
-                .rainbow => RainbowColor,
-                .escape => EscapeColor,
-            }).resetCode();
+        pub fn reset(self: @This()) []const u8 {
+            return switch (self) {
+                .rainbow => RainbowColor.resetCode(),
+                .escape => EscapeColor.resetCode(),
+                .noColor => NoColor.resetCode(),
+            };
         }
     };
 
-    pub fn init(file: File) @This() {
-        const config = std.Io.tty.Config.detect(file);
+    pub fn init(colorPattern: ColorPattern) @This() {
         return .{
-            .config = config,
-            .trueColor = hasTrueColor(config),
+            .colorPattern = colorPattern,
+            .trueColor = hasTrueColor(colorPattern),
         };
     }
 
-    pub fn hasTrueColor(config: std.Io.tty.Config) bool {
-        if (config == .no_color or config == .windows_api) return false;
+    pub fn hasTrueColor(colorPattern: ColorPattern) bool {
+        if (colorPattern == .noColor) return false;
 
         if (std.posix.getenv("COLORTERM")) |colorterm| {
             return std.mem.eql(u8, colorterm, "truecolor");
@@ -106,138 +219,26 @@ pub const ColorPicker = struct {
     }
 
     pub fn reset(self: *@This()) []const u8 {
-        if (self.config == .no_color) return "";
-        if (!self.state.eql(.reset)) {
-            self.state = .reset;
-            return EscapeColor.reset.escapeCode();
-        }
-        return "";
-    }
-
-    pub const RGB = struct {
-        escapeCode: []const u8,
-
-        pub fn from(comptime hex: []const u8) *const @This() {
-            comptime if (hex.len != 7 or hex[0] != '#') @compileError(
-                std.fmt.comptimePrint("Hex [{s}] given isnt RGB\n", .{hex}),
-            );
-
-            comptime for (hex[1..]) |byte| {
-                switch (byte) {
-                    '0'...'9',
-                    'A'...'F',
-                    'a'...'f',
-                    => continue,
-                    else => @compileError(
-                        std.fmt.comptimePrint("Bad byte for RGB in [{s}] - {x}\n", .{ hex, byte }),
-                    ),
-                }
-            };
-
-            return comptime &.{ .escapeCode = std.fmt.comptimePrint(
-                "\x1b[38;2;{s};{s};{s}m",
-                .{
-                    hexStrToDecStr(hex[1..3]),
-                    hexStrToDecStr(hex[3..5]),
-                    hexStrToDecStr(hex[5..7]),
-                },
-            ) };
-        }
-
-        fn hexStrToDecStr(slice: []const u8) []const u8 {
-            return comptime std.fmt.comptimePrint(
-                "{d}",
-                .{std.fmt.parseInt(u8, slice, 16) catch @compileError(
-                    std.fmt.comptimePrint("Input not a hex num [{s}]\n", .{slice}),
-                )},
-            );
-        }
-    };
-
-    pub const RainbowColor = struct {
-        pub fn pick(offset: u16) []const u8 {
-            const bucketIndex: u8 = @intCast(offset % 11);
-            return @as(*const RGB, switch (bucketIndex) {
-                0 => .from("#EF0000"),
-                1 => .from("#FA8072"),
-                2 => .from("#FFA500"),
-                3 => .from("#FFFF00"),
-                4 => .from("#B0FF00"),
-                5 => .from("#00EF00"),
-                6 => .from("#00EF80"),
-                7 => .from("#99D9EA"),
-                8 => .from("#0000EF"),
-                9 => .from("#8F00FF"),
-                10 => .from("#9400D3"),
-                else => unreachable,
-            }).escapeCode;
-        }
-
-        pub fn resetCode() []const u8 {
-            return EscapeColor.reset.escapeCode();
-        }
-    };
-
-    pub const EscapeColor = enum {
-        boldRed,
-        boldGreen,
-        boldYellow,
-        boldBlue,
-        boldMagenta,
-        boldCyan,
-        boldBlack,
-        boldWhite,
-        reset,
-
-        pub fn escapeCode(self: @This()) []const u8 {
-            return switch (self) {
-                .boldRed => "\x1b[1;31m",
-                .boldGreen => "\x1b[1;32m",
-                .boldYellow => "\x1b[1;33m",
-                .boldBlue => "\x1b[1;34m",
-                .boldMagenta => "\x1b[1;35m",
-                .boldCyan => "\x1b[1;36m",
-                .boldBlack => "\x1b[1;30m",
-                .boldWhite => "\x1b[1;37m",
-                .reset => "\x1b[0m",
-            };
-        }
-
-        pub fn pick(offset: u16) []const u8 {
-            // We are ignoring bold black, white and reset
-            const bucketIndex: u8 = @intCast(offset % 6);
-            const color: EscapeColor = @enumFromInt(bucketIndex);
-            std.debug.assert(color != .reset);
-            return color.escapeCode();
-        }
-
-        pub fn resetCode() []const u8 {
-            return EscapeColor.reset.escapeCode();
-        }
-    };
-
-    fn useConfigColoring(self: *const @This()) bool {
-        return (self.config == .escape_codes and !self.trueColor) or
-            self.config == .windows_api;
+        if (self.state.eql(.reset)) return "";
+        self.state = .reset;
+        return self.colorPattern.reset();
     }
 
     pub fn pickColor(self: *@This(), offset: u16) []const u8 {
-        if (self.config == .no_color) return "";
-        if (self.useConfigColoring()) {
-            const target: State = .{ .color = 0 };
-            if (!self.state.eql(target)) {
-                self.state = target;
-                return EscapeColor.boldRed.escapeCode();
-            }
-            return "";
-        } else {
-            const target: State = .{ .color = offset };
-            if (!self.state.eql(target)) {
-                self.state = target;
-                return self.colorPattern.pick(offset);
-            }
-            return "";
-        }
+        const target: State = .{ .color = offset };
+        if (self.state.eql(target)) return "";
+        self.state = target;
+
+        return rfd: switch (self.colorPattern) {
+            .rainbow => rv: {
+                if (!self.trueColor) {
+                    self.colorPattern = .escape;
+                    continue :rfd .escape;
+                }
+                break :rv self.colorPattern.pick(offset);
+            },
+            else => self.colorPattern.pick(offset),
+        };
     }
 };
 
@@ -261,18 +262,23 @@ pub fn pickEventHandler(fDetailed: *const fs.DetailedFile, argsRes: *const args.
     switch (fDetailed.fileType) {
         .tty => {
             if (argsRes.options.hasColor(fDetailed.fileType)) {
-                const colorPicker: ColorPicker = .init(fDetailed.file);
                 if (argsRes.options.@"match-only") {
                     return .{
                         .colorGroupMatchOnly = .{
-                            .colorPicker = colorPicker,
+                            .colorPicker = .init(.escape),
                             .groupHighlight = argsRes.options.@"group-highlight",
                         },
                     };
                 } else {
-                    return .{ .colorMatch = colorPicker };
+                    return .{ .colorMatch = .init(.escape) };
                 }
             } else {
+                if (argsRes.options.@"match-only") return .{
+                    .colorGroupMatchOnly = .{
+                        .colorPicker = .init(.noColor),
+                        .groupHighlight = false,
+                    },
+                };
                 return .skipLineOnMatch;
             }
         },
@@ -280,7 +286,15 @@ pub fn pickEventHandler(fDetailed: *const fs.DetailedFile, argsRes: *const args.
         .characterDevice,
         .file,
         .pipe,
-        => return .skipLineOnMatch,
+        => {
+            if (argsRes.options.@"match-only") return .{
+                .colorGroupMatchOnly = .{
+                    .colorPicker = .init(.noColor),
+                    .groupHighlight = false,
+                },
+            };
+            return .skipLineOnMatch;
+        },
     }
     unreachable;
 }
@@ -464,7 +478,6 @@ pub const Sink = struct {
 
     pub const ConsumeError = error{} ||
         std.fs.File.WriteError ||
-        std.Io.tty.Config.SetColorError ||
         Writer.Error;
 
     pub const ConsumeResponse = union(enum) {
@@ -480,7 +493,7 @@ pub const Sink = struct {
             .colorMatch => |*colorPicker| {
                 switch (event) {
                     .match => |matchEvent| {
-                        var cChunks = ColoredChunks(2).init(
+                        var cChunks = ColoredChunks(1).init(
                             colorPicker,
                             @intCast(matchEvent.group.n),
                         );
@@ -491,7 +504,7 @@ pub const Sink = struct {
                     .beforeMatch,
                     .noMatchEndOfLineAfterMatch,
                     => |data| {
-                        var cChunks = ColoredChunks(2).init(
+                        var cChunks = ColoredChunks(1).init(
                             colorPicker,
                             @intCast(0),
                         );
@@ -520,6 +533,7 @@ pub const Sink = struct {
                     .noMatchEndOfLine,
                     => return .eventSkipped,
                     .match => |matchEvent| {
+                        // NOTE: this could live outside of this event handler into a more specific one, however this would still need it, so there's no point, we are using a sane default of .noColor for color strategy in the other case
                         if (matchEvent.group.n == 0) {
                             groupTracker.cursor = matchEvent.group.start;
                             groupTracker.group0 = matchEvent.group;
@@ -528,7 +542,7 @@ pub const Sink = struct {
                                 return .eventPostponed;
                             }
 
-                            var cChunks = ColoredChunks(4).init(
+                            var cChunks = ColoredChunks(2).init(
                                 &groupTracker.colorPicker,
                                 @intCast(matchEvent.group.n),
                             );
@@ -548,7 +562,7 @@ pub const Sink = struct {
                             const endChunk = !matchEvent.targetGroup.anyOtherThan(group.n) or
                                 matchEvent.count - 1 == group.n;
 
-                            var cChunks = ColoredChunks(8).init(
+                            var cChunks = ColoredChunks(4).init(
                                 &groupTracker.colorPicker,
                                 @intCast(group.n),
                             );
@@ -642,8 +656,8 @@ pub const Sink = struct {
     }
 };
 
-// TODO: can this be moved inside ColorPicker?
-pub fn ColoredChunks(comptime size: usize) type {
+pub fn ColoredChunks(comptime n: std.math.IntFittingRange(0, std.math.maxInt(usize) / 2)) type {
+    const size = n * 2;
     return struct {
         colorOffset: u16 = undefined,
         chunks: [size][]const u8 = undefined,
