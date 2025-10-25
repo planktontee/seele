@@ -76,7 +76,6 @@ pub const MmapSource = struct {
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         std.posix.munmap(self.buffer);
         allocator.destroy(self);
-        self.* = undefined;
     }
 
     pub const MmapBufferError = std.posix.RealPathError || std.posix.MMapError;
@@ -134,7 +133,6 @@ pub const InPlaceGrowingReader = struct {
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         self.allocator.free(self.fsReader.interface.buffer);
         allocator.destroy(self);
-        self.* = undefined;
     }
 };
 
@@ -217,7 +215,7 @@ pub const SourceReader = union(SourceBufferType) {
                     .positional => fDetailed.file.reader(buff),
                 };
                 const writer = try std.Io.Writer.Allocating.initCapacity(
-                    std.heap.page_allocator,
+                    allocator,
                     config.targetInitialSize,
                 );
 

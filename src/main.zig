@@ -55,14 +55,12 @@ pub fn main() !u8 {
 
     if (result.verb == null) result.verb = .{ .match = .initEmpty(allocator) };
 
-    // TODO: make sink system
-    // STDOUT pipe and file should have fast output, tty should be slower
-    // STDIN pipe and file should have fast input, tty should be slower
     try run(&result);
+
     return 0;
 }
 
-pub const FileType = union(enum) {
+pub const FileArgType = union(enum) {
     stdin,
     file: []const u8,
 
@@ -83,7 +81,7 @@ pub fn open(fileArg: []const u8) OpenError!std.fs.File {
 }
 
 pub const FileCursor = struct {
-    files: [1]FileType = undefined,
+    files: [1]FileArgType = undefined,
     current: ?std.fs.File = null,
     idx: usize = 0,
 
@@ -104,7 +102,7 @@ pub const FileCursor = struct {
         return self;
     }
 
-    pub fn currentType(self: *const @This()) FileType {
+    pub fn currentType(self: *const @This()) FileArgType {
         return self.files[self.idx];
     }
 
@@ -146,6 +144,9 @@ pub fn run(argsRes: *const args.ArgsRes) RunError!void {
     // NOTE: because Fba only resizes the last piece allocated, we need to split
     // the stack mem into 2 different allocators to ensure they can grow
     // Zig issues a prlimit64 for 16mb, I'm taking 12mb here for IO, probably not a good idea and wont work on OSs that return error on that call
+    // For debug builds, bigger stacks were seemingly being consumed elsewhere, so I reduced
+    // it to 4mb, completely arbitrarily, I will leave this here for now but I'm moving to a debug
+    // allocator for Debug build instead
     const stackPartitionSize = rv: {
         if (builtin.mode == .Debug) {
             break :rv units.CacheSize.L2 * 2;
@@ -154,10 +155,37 @@ pub fn run(argsRes: *const args.ArgsRes) RunError!void {
         }
         unreachable;
     };
-    var inputSfb = mem.stackFallback(stackPartitionSize, std.heap.page_allocator);
-    var outputSfb = mem.stackFallback(stackPartitionSize, std.heap.page_allocator);
-    const inputAlloc = inputSfb.get();
-    const outputAlloc = outputSfb.get();
+    const DebugAlloc = std.heap.DebugAllocator(.{
+        .safety = true,
+    });
+
+    // TODO: move this to top-level
+    const inputAlloc = rv: {
+        if (builtin.mode == .Debug) {
+            var dba = DebugAlloc.init;
+            break :rv dba.allocator();
+        } else {
+            var inputSfb = mem.stackFallback(stackPartitionSize, std.heap.page_allocator);
+            break :rv inputSfb.get();
+        }
+    };
+    const outputAlloc = rv: {
+        if (builtin.mode == .Debug) {
+            var dba = DebugAlloc.init;
+            break :rv dba.allocator();
+        } else {
+            var outputSfb = mem.stackFallback(stackPartitionSize, std.heap.page_allocator);
+            break :rv outputSfb.get();
+        }
+    };
+    defer {
+        if (builtin.mode == .Debug) {
+            const inDba: *DebugAlloc = @ptrCast(@alignCast(inputAlloc.ptr));
+            const outDba: *DebugAlloc = @ptrCast(@alignCast(outputAlloc.ptr));
+            if (inDba.deinit() == .leak) @panic("Input memory leaked!");
+            if (outDba.deinit() == .leak) @panic("Output memory leaked!");
+        }
+    }
 
     const matchPattern = argsRes.positionals.tuple.@"0";
     var rgx = try regex.compile(matchPattern, reporter);
@@ -179,10 +207,6 @@ pub fn run(argsRes: *const args.ArgsRes) RunError!void {
         argsRes,
     );
     defer fSink.deinit(outputAlloc);
-
-    std.debug.print("Event handler: {s}\n", .{
-        @tagName(fSink.eventHandler),
-    });
 
     if (argsRes.options.@"line-by-line") {
         // TODO: checks for ovect[0] > ovect[1]
@@ -257,7 +281,6 @@ pub fn run(argsRes: *const args.ArgsRes) RunError!void {
                                 .eventSkipped,
                                 .eventConsumed,
                                 => {
-                                    // TODO: when considering group0 for a soft-match, we cant update start like this
                                     start = group.end;
                                 },
                             }

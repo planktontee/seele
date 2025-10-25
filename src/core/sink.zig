@@ -334,7 +334,6 @@ pub const GrowingWriter = struct {
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         self.allocating.deinit();
         allocator.destroy(self);
-        self.* = undefined;
     }
 };
 

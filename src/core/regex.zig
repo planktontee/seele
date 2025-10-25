@@ -62,12 +62,8 @@ pub const Regex = struct {
     matchData: *pcre2.pcre2_match_data_8,
 
     pub fn deinit(self: *@This()) void {
-        // std.debug.print("Add {*}\n", .{self.compContext});
-        // pcre2.pcre2_compile_context_free_8(self.compContext);
-        // self.compContext = undefined;
         pcre2.pcre2_match_data_free_8(self.matchData);
         self.matchData = undefined;
-        // pcre2.pcre2_jit_free_unused_memory_8(null);
         pcre2.pcre2_code_free_8(self.re);
         self.re = undefined;
     }
