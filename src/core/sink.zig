@@ -470,8 +470,9 @@ pub const Sink = struct {
             .buffered,
             .directWrite,
             => |*w| {
-                allocator.free(w.interface.buffer);
-                allocator.destroy(w);
+                if (w.interface.buffer.len > 0) {
+                    allocator.free(w.interface.buffer);
+                }
             },
         }
     }
@@ -553,7 +554,7 @@ pub const Sink = struct {
                     .match => |matchEvent| {
                         switch (matchEvent.group.n) {
                             0 => {
-                                std.debug.assert(matchEvent.count == 1);
+                                std.debug.assert(!matchEvent.targetGroup.anyGreaterThan(0));
 
                                 var cChunks = ColoredChunks(2).init(&groupTracker.colorPicker, 0);
 

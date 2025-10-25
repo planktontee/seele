@@ -180,6 +180,10 @@ pub fn run(argsRes: *const args.ArgsRes) RunError!void {
     );
     defer fSink.deinit(outputAlloc);
 
+    std.debug.print("Event handler: {s}\n", .{
+        @tagName(fSink.eventHandler),
+    });
+
     if (argsRes.options.@"line-by-line") {
         // TODO: checks for ovect[0] > ovect[1]
         // TODO: checks for empty
@@ -210,7 +214,7 @@ pub fn run(argsRes: *const args.ArgsRes) RunError!void {
 
                         // NOTE: handlign group0, group0 contains everything, hightlighting will be
                         // done on top of that for groups, in case it's needed
-                        const targetGroup = try argsRes.options.targetGroup(matchData.count);
+                        const targetGroup = try argsRes.options.targetGroup(&fSink, matchData.count);
                         for (0..matchData.count) |i| {
                             const group = try matchData.group(i);
                             switch (targetGroup) {

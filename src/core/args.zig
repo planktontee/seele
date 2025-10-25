@@ -12,6 +12,7 @@ const GroupMatchConfig = validate.GroupMatchConfig;
 const SpecResponseWithConfig = spec.SpecResponseWithConfig;
 const positionals = args.positionals;
 const fs = @import("fs.zig");
+const sink = @import("sink.zig");
 
 const DefaultCodec = args.codec.ArgCodec(Args);
 const CursorT = zpec.collections.Cursor([]const u8);
@@ -417,14 +418,27 @@ pub const Args = struct {
             (fileType == .tty and colored == null));
     }
 
-    pub const TargetGroupError = error{UnsupportedGroupPicking};
+    pub const TargetGroupError = error{
+        InvalidGroupsForOptions,
+    };
 
-    pub fn targetGroup(self: *const @This(), maxGroups: usize) TargetGroupError!TargetGroup {
-        if (!self.@"group-highlight" and self.groups != .zero) return TargetGroupError.UnsupportedGroupPicking;
-        if (maxGroups > 1 and self.@"group-highlight" and self.groups == .zero) {
-            return .{ .range = .{ .start = 1, .end = maxGroups } };
+    pub fn targetGroup(self: *const @This(), fSink: *const sink.Sink, maxGroups: usize) TargetGroupError!TargetGroup {
+        switch (fSink.eventHandler) {
+            // Deciding whether or not to use colors is on the event handler
+            .colorMatch,
+            .coloredMatchOnly,
+            => {
+                if (maxGroups > 1 and self.@"group-highlight" and self.groups == .zero) {
+                    return .{ .range = .{ .start = 1, .end = maxGroups } };
+                }
+                return self.groups;
+            },
+            .matchOnly,
+            .skipLineOnMatch,
+            .pickNonMatchingLine,
+            => return .zero,
         }
-        return self.groups;
+        unreachable;
     }
 };
 
