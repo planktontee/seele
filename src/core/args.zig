@@ -25,15 +25,17 @@ pub const ArgsCodec = struct {
         LinearItemsNotSorted,
         InvalidRange,
         RangesOverlap,
-        LinearItemOverlapsWithRange,
+        RangesNotSorted,
+        ItemOverlapsWithRange,
         EmptyTargetGroups,
+        Group0NotAlone,
     } || DefaultCodec.Error;
 
     pub fn supports(
         comptime T: type,
         comptime tag: DefaultCodec.SpecFieldEnum,
     ) bool {
-        return tag == .groups and T == []const TargetGroup;
+        return tag == .groups and T == TargetGroup;
     }
 
     pub fn parseByType(
@@ -47,7 +49,7 @@ pub const ArgsCodec = struct {
             return try self.defaultCodec.parseByType(T, tag, allocator, cursor);
         }
 
-        if (comptime T != []const TargetGroup or tag != .groups) @compileError("Unsupported type in custom codec");
+        if (comptime T != TargetGroup or tag != .groups) @compileError("Unsupported type in custom codec");
 
         return try self.parseGroups(allocator, cursor);
     }
@@ -56,7 +58,7 @@ pub const ArgsCodec = struct {
         _: *@This(),
         allocator: *const std.mem.Allocator,
         cursor: *CursorT,
-    ) Error![]const TargetGroup {
+    ) Error!TargetGroup {
         const arr = try args.codec.PrimitiveCodec.parseArray(
             &args.codec.PrimitiveCodec{},
             []const []const u8,
@@ -68,7 +70,7 @@ pub const ArgsCodec = struct {
 
         var linearIterTargets = try std.ArrayListUnmanaged(u16).initCapacity(allocator.*, 3);
         errdefer linearIterTargets.deinit(allocator.*);
-        var targets = try std.ArrayListUnmanaged(TargetGroup).initCapacity(allocator.*, 3);
+        var targets = try std.ArrayListUnmanaged(RangeGroup).initCapacity(allocator.*, 3);
         errdefer targets.deinit(allocator.*);
 
         const State = enum {
@@ -82,6 +84,7 @@ pub const ArgsCodec = struct {
 
         var state: State = .none;
 
+        // TODO: move range tokenizer elsewhere
         for (arr) |item| {
             var start: u16 = 0;
             var end: u16 = 0;
@@ -181,29 +184,31 @@ pub const ArgsCodec = struct {
                         try linearIterTargets.append(allocator.*, start);
                     } else {
                         const last = linearIterTargets.items[linearIterTargets.items.len - 1];
+                        if (last == 0) return Error.Group0NotAlone;
                         if (last >= start) return Error.LinearItemsNotSorted;
                         try linearIterTargets.append(allocator.*, start);
                     }
                 },
                 .numberAfterRange => {
-                    if (start >= end) return Error.InvalidRange;
+                    if (start >= end or start == 0) return Error.InvalidRange;
+
                     if (targets.items.len == 0) {
                         try targets.append(
                             allocator.*,
-                            .{ .range = .{ .start = start, .end = end } },
+                            .{ .start = start, .end = end },
                         );
                     } else {
                         const last = targets.items[targets.items.len - 1];
-                        switch (last) {
-                            .range => |range| {
-                                if (range.includes(start) or range.includes(end)) return Error.RangesOverlap;
-                                try targets.append(
-                                    allocator.*,
-                                    .{ .range = .{ .start = start, .end = end } },
-                                );
-                            },
-                            else => unreachable,
-                        }
+
+                        if (last.includes(start) or
+                            last.includes(end)) return Error.RangesOverlap;
+
+                        if (last.end > start) return Error.RangesNotSorted;
+
+                        try targets.append(
+                            allocator.*,
+                            .{ .start = start, .end = end },
+                        );
                     }
                 },
                 else => return Error.UnexpectedEndOfInput,
@@ -212,29 +217,37 @@ pub const ArgsCodec = struct {
             state = .none;
         }
 
+        if (targets.items.len == 0 and linearIterTargets.items.len == 0) return Error.EmptyTargetGroups;
+
+        if (linearIterTargets.items.len == 1 and
+            linearIterTargets.items[0] == 0)
+        {
+            targets.deinit(allocator.*);
+            linearIterTargets.deinit(allocator.*);
+            return .zero;
+        }
+
+        var chainedGroup: ChainedGroup = .{};
         if (linearIterTargets.items.len > 0) {
             const linearItems = try linearIterTargets.toOwnedSlice(allocator.*);
-            for (targets.items) |target| {
-                switch (target) {
-                    .range => |range| {
-                        for (linearItems) |item| {
-                            if (range.includes(item)) return Error.LinearItemOverlapsWithRange;
-                        }
-                    },
-                    else => unreachable,
+            for (targets.items) |range| {
+                for (linearItems) |item| {
+                    if (range.includes(item)) return Error.ItemOverlapsWithRange;
                 }
             }
 
-            try targets.append(allocator.*, .{
-                .linearIter = .{ .arr = linearItems },
-            });
+            chainedGroup.perItem = .{ .arr = linearItems };
         } else {
             linearIterTargets.deinit(allocator.*);
         }
 
-        if (targets.items.len <= 0) return Error.EmptyTargetGroups;
+        if (targets.items.len > 0) {
+            chainedGroup.ranges = try targets.toOwnedSlice(allocator.*);
+        } else {
+            targets.deinit(allocator.*);
+        }
 
-        return try targets.toOwnedSlice(allocator.*);
+        return .{ .chained = chainedGroup };
     }
 };
 
@@ -243,9 +256,7 @@ pub const Args = struct {
     @"invert-match": bool = false,
     @"match-only": bool = false,
 
-    groups: []const TargetGroup = &.{
-        .{ .linearIter = .{ .arr = &.{0} } },
-    },
+    groups: TargetGroup = .zero,
 
     multiline: bool = false,
     recursive: bool = false,
@@ -291,6 +302,10 @@ pub const Args = struct {
         // .mutuallyExclusive = &.{
         //     &.{ .byteRanges, .@"line-by-line", .multiline },
         // },
+        //
+        // One-way inclusive:
+        // --groups -> --group-highlight
+        //
     };
 
     pub const Help: HelpData(@This()) = .{
@@ -402,53 +417,14 @@ pub const Args = struct {
             (fileType == .tty and colored == null));
     }
 
-    pub const TargetGroupError = error{
-        InvalidTargetGroup,
-        TargetGroupsNotSorted,
-    };
+    pub const TargetGroupError = error{UnsupportedGroupPicking};
 
-    pub fn targetGroup(self: *const @This(), _: usize) TargetGroupError!TargetGroup {
-        // TODO: remake this logic and glue together group array
-
-        // NOTE: we try to reduce to group0 as much as we can
-        // if (self.groups) |groups| {
-        //     if (groups.len == 0) return TargetGroupError.InvalidTargetGroup;
-        //
-        //     if (groups[0] + 1 > max) return TargetGroupError.InvalidTargetGroup;
-        //     if (groups[0] == 0) return .{ .fixed = .{} };
-        //     if (groups.len > 1) {
-        //         // TODO: sort on parse
-        //         for (groups[1..], 1..groups.len) |item, i| {
-        //             if (item == 0) return .{ .fixed = .{} };
-        //             if (item + 1 > max) return TargetGroupError.InvalidTargetGroup;
-        //             if (item < groups[i - 1]) return TargetGroupError.TargetGroupsNotSorted;
-        //         }
-        //     }
-        //
-        //     return .{ .linearIter = .{ .arr = groups } };
-        // } else {
-        //     if (self.@"group-highlight" and max > 1) {
-        //         return .{ .range = .{} };
-        //     }
-        //     return .{ .fixed = .{} };
-        // }
-        // for (self.groups) |group| {
-        //     switch (group) {
-        //         .range => |range| {
-        //             std.debug.print(
-        //                 "Range {d}...{d}\n",
-        //                 .{ range.start, range.end },
-        //             );
-        //         },
-        //         .linearIter => |iter| {
-        //             std.debug.print(
-        //                 "LinearIter {d}: {any}\n",
-        //                 .{ iter.arr.len, iter.arr },
-        //             );
-        //         },
-        //     }
-        // }
-        return @as(TargetGroupError!TargetGroup, self.groups[0]);
+    pub fn targetGroup(self: *const @This(), maxGroups: usize) TargetGroupError!TargetGroup {
+        if (!self.@"group-highlight" and self.groups != .zero) return TargetGroupError.UnsupportedGroupPicking;
+        if (maxGroups > 1 and self.@"group-highlight" and self.groups == .zero) {
+            return .{ .range = .{ .start = 1, .end = maxGroups } };
+        }
+        return self.groups;
     }
 };
 
@@ -460,14 +436,12 @@ pub const RangeGroup = struct {
         return group >= self.start and group <= self.end;
     }
 
-    pub fn anyOtherThan(self: *const @This(), group: usize) bool {
-        return self.end - group > rv: {
-            break :rv if (self.includes(group)) @as(usize, 1) else @as(usize, 0);
-        };
+    pub fn anyGreaterThan(self: *const @This(), group: usize) bool {
+        return self.end > group;
     }
 };
 
-pub const LinearGroup = struct {
+pub const PerItemGroup = struct {
     arr: []const u16,
 
     pub fn includes(self: *const @This(), group: usize) bool {
@@ -475,19 +449,56 @@ pub const LinearGroup = struct {
         return false;
     }
 
-    pub fn anyOtherThan(self: *const @This(), group: usize) bool {
-        for (self.arr) |item| if (item > group) return true;
+    pub fn anyGreaterThan(self: *const @This(), group: usize) bool {
+        if (self.arr.len > 0 and self.arr[self.arr.len - 1] > group) return true;
+        return false;
+    }
+};
+
+pub const ChainedGroup = struct {
+    ranges: []const RangeGroup = &.{},
+    perItem: PerItemGroup = .{ .arr = &.{} },
+
+    pub fn includes(self: *const @This(), group: usize) bool {
+        for (self.ranges) |range| if (range.includes(group)) return true;
+        return self.perItem.includes(group);
+    }
+
+    pub fn anyGreaterThan(self: *const @This(), group: usize) bool {
+        if (self.ranges.len > 0 and
+            self.ranges[self.ranges.len - 1].anyGreaterThan(group))
+        {
+            return true;
+        }
+        return self.perItem.anyGreaterThan(group);
+    }
+};
+
+pub const ZeroGroup = struct {
+    pub fn includes(_: *const @This(), group: usize) bool {
+        return group == 0;
+    }
+
+    pub fn anyGreaterThan(_: *const @This(), _: usize) bool {
         return false;
     }
 };
 
 pub const TargetGroup = union(enum) {
+    zero: ZeroGroup,
     range: RangeGroup,
-    linearIter: LinearGroup,
+    perItem: PerItemGroup,
+    chained: ChainedGroup,
 
-    pub fn anyOtherThan(self: *const @This(), group: usize) bool {
+    pub fn includes(self: *const @This(), group: usize) bool {
         return switch (self.*) {
-            inline else => |tg| tg.anyOtherThan(group),
+            inline else => |tg| tg.includes(group),
+        };
+    }
+
+    pub fn anyGreaterThan(self: *const @This(), group: usize) bool {
+        return switch (self.*) {
+            inline else => |tg| tg.anyGreaterThan(group),
         };
     }
 };

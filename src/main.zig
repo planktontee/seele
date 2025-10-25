@@ -212,13 +212,19 @@ pub fn run(argsRes: *const args.ArgsRes) RunError!void {
                         // done on top of that for groups, in case it's needed
                         const targetGroup = try argsRes.options.targetGroup(matchData.count);
                         for (0..matchData.count) |i| {
-                            if (i != 0) {
-                                switch (targetGroup) {
-                                    inline else => |tg| if (!tg.includes(i)) continue,
-                                }
+                            const group = try matchData.group(i);
+                            switch (targetGroup) {
+                                inline else => |tg| if (!tg.includes(i)) {
+                                    _ = try fSink.consume(.{
+                                        .excludedMatch = .{
+                                            .group = group,
+                                            .line = line,
+                                        },
+                                    });
+                                    continue;
+                                },
                             }
 
-                            const group = try matchData.group(i);
                             if (start > group.start) continue;
 
                             if (start < group.start) {
@@ -240,7 +246,7 @@ pub fn run(argsRes: *const args.ArgsRes) RunError!void {
                                 // group
                                 .eventPostponed,
                                 => {},
-                                .eventPostponedFinished,
+                                .eventForward,
                                 => |lastIndex| {
                                     start = lastIndex;
                                 },
@@ -252,6 +258,8 @@ pub fn run(argsRes: *const args.ArgsRes) RunError!void {
                                 },
                             }
                         }
+
+                        _ = try fSink.consume(.endOfMatchGroups);
                     }
 
                     _ = try fSink.consume(.endOfLine);
