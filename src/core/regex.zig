@@ -143,12 +143,19 @@ pub const RegexMatch = struct {
 
     pub const GroupError = error{
         InvalidGroup,
+        GroupSkipped,
     };
 
     pub fn group(self: *const @This(), n: usize) GroupError!RegexMatchGroup {
         if (n + 1 > self.count) return GroupError.InvalidGroup;
         const start = n * 2;
         const end = n * 2 + 1;
-        return .init(n, self.ovector[start], self.ovector[end]);
+        const idx0 = self.ovector[start];
+        if (idx0 == pcre2.PCRE2_UNSET) return GroupError.GroupSkipped;
+        const idx1 = self.ovector[end];
+
+        std.debug.assert(idx0 != pcre2.PCRE2_UNSET);
+        std.debug.assert(idx1 != pcre2.PCRE2_UNSET);
+        return .init(n, idx0, idx1);
     }
 };

@@ -210,8 +210,13 @@ pub fn run(argsRes: *const args.ArgsRes) RunError!void {
 
     if (argsRes.options.@"line-by-line") {
         // TODO: checks for ovect[0] > ovect[1]
+        // This happens when the match is partial
+
         // TODO: checks for empty
+        // should we block this?
+
         // TODO: check for \K
+        // \K handling needs partial and other types of handling for anchoring
 
         while (true) {
             const readEvent = try fSource.nextLine();
@@ -240,7 +245,10 @@ pub fn run(argsRes: *const args.ArgsRes) RunError!void {
                         // done on top of that for groups, in case it's needed
                         const targetGroup = try argsRes.options.targetGroup(&fSink, matchData.count);
                         for (0..matchData.count) |i| {
-                            const group = try matchData.group(i);
+                            const group = matchData.group(i) catch |e| switch (e) {
+                                regex.RegexMatch.GroupError.GroupSkipped => continue,
+                                else => return e,
+                            };
                             switch (targetGroup) {
                                 inline else => |tg| if (!tg.includes(i)) {
                                     _ = try fSink.consume(.{
