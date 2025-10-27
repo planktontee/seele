@@ -3,163 +3,12 @@ const units = @import("zpec").units;
 const fs = @import("fs.zig");
 const args = @import("args.zig");
 const regex = @import("regex.zig");
+const tty = @import("tty.zig");
 const File = std.fs.File;
 const Writer = std.Io.Writer;
 
-// TODO: delete this
-pub const Reporter = struct {
-    stdoutW: *Writer = undefined,
-    stderrW: *Writer = undefined,
-};
-
-pub const SinkBufferType = enum {
-    growing,
-    buffered,
-    directWrite,
-};
-
-pub const SinkBuffer = union(SinkBufferType) {
-    growing: usize,
-    buffered: usize,
-    directWrite,
-};
-
-pub fn pickSinkBuffer(fDetailed: *const fs.DetailedFile, eventHandler: EventHandler) SinkBuffer {
-    switch (fDetailed.fileType) {
-        .tty => {
-            return switch (eventHandler) {
-                .coloredMatchOnly,
-                .colorMatch,
-                .matchOnly,
-                => .{ .growing = units.CacheSize.L2 },
-                .skipLineOnMatch,
-                .pickNonMatchingLine,
-                => .directWrite,
-            };
-        },
-        .generic,
-        .characterDevice,
-        .pipe,
-        .file,
-        => return .{ .buffered = units.CacheSize.L2 },
-    }
-    unreachable;
-}
-
-pub const NoColor = struct {
-    pub fn pick() []const u8 {
-        return "";
-    }
-
-    pub fn resetCode() []const u8 {
-        return "";
-    }
-};
-
-pub const RGB = struct {
-    escapeCode: []const u8,
-
-    pub fn from(comptime hex: []const u8) *const @This() {
-        comptime if (hex.len != 7 or hex[0] != '#') @compileError(
-            std.fmt.comptimePrint("Hex [{s}] given isnt RGB\n", .{hex}),
-        );
-
-        comptime for (hex[1..]) |byte| {
-            switch (byte) {
-                '0'...'9',
-                'A'...'F',
-                'a'...'f',
-                => continue,
-                else => @compileError(
-                    std.fmt.comptimePrint("Bad byte for RGB in [{s}] - {x}\n", .{ hex, byte }),
-                ),
-            }
-        };
-
-        return comptime &.{ .escapeCode = std.fmt.comptimePrint(
-            "\x1b[38;2;{s};{s};{s}m",
-            .{
-                hexStrToDecStr(hex[1..3]),
-                hexStrToDecStr(hex[3..5]),
-                hexStrToDecStr(hex[5..7]),
-            },
-        ) };
-    }
-
-    fn hexStrToDecStr(slice: []const u8) []const u8 {
-        return comptime std.fmt.comptimePrint(
-            "{d}",
-            .{std.fmt.parseInt(u8, slice, 16) catch @compileError(
-                std.fmt.comptimePrint("Input not a hex num [{s}]\n", .{slice}),
-            )},
-        );
-    }
-};
-
-pub const RainbowColor = struct {
-    pub fn pick(offset: u16) []const u8 {
-        const bucketIndex: u8 = @intCast(offset % 11);
-        return @as(*const RGB, switch (bucketIndex) {
-            0 => .from("#EF0000"),
-            1 => .from("#FA8072"),
-            2 => .from("#FFA500"),
-            3 => .from("#FFFF00"),
-            4 => .from("#B0FF00"),
-            5 => .from("#00EF00"),
-            6 => .from("#00EF80"),
-            7 => .from("#99D9EA"),
-            8 => .from("#0000EF"),
-            9 => .from("#8F00FF"),
-            10 => .from("#9400D3"),
-            else => unreachable,
-        }).escapeCode;
-    }
-
-    pub fn resetCode() []const u8 {
-        return EscapeColor.reset.escapeCode();
-    }
-};
-
-pub const EscapeColor = enum {
-    boldRed,
-    boldGreen,
-    boldYellow,
-    boldBlue,
-    boldMagenta,
-    boldCyan,
-    boldBlack,
-    boldWhite,
-    reset,
-
-    pub fn escapeCode(self: @This()) []const u8 {
-        return switch (self) {
-            .boldRed => "\x1b[1;31m",
-            .boldGreen => "\x1b[1;32m",
-            .boldYellow => "\x1b[1;33m",
-            .boldBlue => "\x1b[1;34m",
-            .boldMagenta => "\x1b[1;35m",
-            .boldCyan => "\x1b[1;36m",
-            .boldBlack => "\x1b[1;30m",
-            .boldWhite => "\x1b[1;37m",
-            .reset => "\x1b[0m",
-        };
-    }
-
-    pub fn pick(offset: u16) []const u8 {
-        // We are ignoring bold black, white and reset
-        const bucketIndex: u8 = @intCast(offset % 6);
-        const color: EscapeColor = @enumFromInt(bucketIndex);
-        std.debug.assert(color != .reset);
-        return color.escapeCode();
-    }
-
-    pub fn resetCode() []const u8 {
-        return EscapeColor.reset.escapeCode();
-    }
-};
-
 pub const ColorPicker = struct {
-    colorPattern: ColorPattern = .escape,
+    colorPattern: tty.ColorPattern = .escape,
     trueColor: bool,
     state: State = .reset,
 
@@ -181,36 +30,14 @@ pub const ColorPicker = struct {
         }
     };
 
-    pub const ColorPattern = enum {
-        rainbow,
-        escape,
-        noColor,
-
-        pub fn pick(self: @This(), offset: u16) []const u8 {
-            return switch (self) {
-                .rainbow => RainbowColor.pick(offset),
-                .escape => EscapeColor.pick(offset),
-                .noColor => NoColor.pick(),
-            };
-        }
-
-        pub fn reset(self: @This()) []const u8 {
-            return switch (self) {
-                .rainbow => RainbowColor.resetCode(),
-                .escape => EscapeColor.resetCode(),
-                .noColor => NoColor.resetCode(),
-            };
-        }
-    };
-
-    pub fn init(colorPattern: ColorPattern) @This() {
+    pub fn init(colorPattern: tty.ColorPattern) @This() {
         return .{
             .colorPattern = colorPattern,
             .trueColor = hasTrueColor(colorPattern),
         };
     }
 
-    pub fn hasTrueColor(colorPattern: ColorPattern) bool {
+    pub fn hasTrueColor(colorPattern: tty.ColorPattern) bool {
         if (colorPattern == .noColor) return false;
 
         if (std.posix.getenv("COLORTERM")) |colorterm| {
@@ -243,6 +70,113 @@ pub const ColorPicker = struct {
     }
 };
 
+pub fn ColoredChunks(comptime n: std.math.IntFittingRange(0, std.math.maxInt(usize) / 2)) type {
+    const size = n * 2;
+    return struct {
+        colorOffset: u16 = undefined,
+        chunks: [size][]const u8 = undefined,
+        at: usize = 0,
+        colorPicker: *ColorPicker = undefined,
+
+        pub fn init(colorPicker: *ColorPicker, offset: u16) @This() {
+            std.debug.assert(colorPicker.trueColor);
+            var self: @This() = .{};
+
+            self.colorPicker = colorPicker;
+            self.colorOffset = offset;
+
+            return self;
+        }
+
+        pub fn clearChunk(self: *@This(), chunk: []const u8) void {
+            std.debug.assert(self.at + 2 <= self.chunks.len);
+            if (chunk.len > 0) {
+                self.chunks[self.at] = self.colorPicker.reset();
+                self.chunks[self.at + 1] = chunk;
+            } else {
+                self.chunks[self.at] = "";
+                self.chunks[self.at + 1] = "";
+            }
+            self.at += 2;
+        }
+
+        pub fn coloredChunk(self: *@This(), chunk: []const u8) void {
+            std.debug.assert(self.at + 2 <= self.chunks.len);
+            if (chunk.len > 0) {
+                self.chunks[self.at] = self.colorPicker.pickColor(self.colorOffset);
+                self.chunks[self.at + 1] = chunk;
+            } else {
+                self.chunks[self.at] = "";
+                self.chunks[self.at + 1] = "";
+            }
+            self.at += 2;
+        }
+
+        pub fn skipChunk(self: *@This()) void {
+            std.debug.assert(self.at + 2 <= self.chunks.len);
+            self.chunks[self.at] = "";
+            self.chunks[self.at + 1] = "";
+            self.at += 2;
+        }
+
+        // crawls all chunks to see if there's a breakline already in there before all
+        // skipped chunks
+        pub fn breakline(self: *@This()) void {
+            std.debug.assert(self.at + 2 == size);
+            var chunk = size - 3;
+            while (chunk > 0) : (chunk -|= 2) {
+                const last = self.chunks[chunk];
+                if (last.len == 0) continue;
+
+                self.add(if (last.len > 0 and last[last.len - 1] != '\n') "\n" else "");
+                return;
+            }
+        }
+
+        pub fn add(self: *@This(), chunk: []const u8) void {
+            std.debug.assert(self.at + 2 <= self.chunks.len);
+            self.chunks[self.at] = "";
+            self.chunks[self.at + 1] = chunk;
+            self.at += 2;
+        }
+    };
+}
+
+pub const SinkBufferType = enum {
+    growing,
+    buffered,
+    directWrite,
+};
+
+pub const SinkBuffer = union(SinkBufferType) {
+    growing: usize,
+    buffered: usize,
+    directWrite,
+};
+
+pub fn pickSinkBuffer(fDetailed: *const fs.DetailedFile, eventHandler: EventHandler) SinkBuffer {
+    switch (fDetailed.fileType) {
+        .tty => {
+            return switch (eventHandler) {
+                .coloredMatchOnly,
+                .colorMatch,
+                => .{ .growing = units.CacheSize.L2 },
+                .skipLineOnMatch,
+                .pickNonMatchingLine,
+                => .directWrite,
+                .matchOnly,
+                => .{ .buffered = units.CacheSize.L2 },
+            };
+        },
+        .generic,
+        .characterDevice,
+        .pipe,
+        .file,
+        => return .{ .buffered = units.CacheSize.L2 },
+    }
+    unreachable;
+}
+
 pub const GroupTracker = struct {
     colorPicker: ColorPicker,
     cursor: usize = 0,
@@ -262,7 +196,7 @@ pub fn pickEventHandler(fDetailed: *const fs.DetailedFile, argsRes: *const args.
 
     switch (fDetailed.fileType) {
         .tty => {
-            const colorPattern: ColorPicker.ColorPattern = if (argsRes.options.hasColor(fDetailed.fileType)) .escape else .noColor;
+            const colorPattern: tty.ColorPattern = if (argsRes.options.hasColor(fDetailed.fileType)) .escape else .noColor;
 
             if (argsRes.options.@"match-only") {
                 return switch (colorPattern) {
@@ -733,75 +667,3 @@ pub const Sink = struct {
         }
     }
 };
-
-pub fn ColoredChunks(comptime n: std.math.IntFittingRange(0, std.math.maxInt(usize) / 2)) type {
-    const size = n * 2;
-    return struct {
-        colorOffset: u16 = undefined,
-        chunks: [size][]const u8 = undefined,
-        at: usize = 0,
-        colorPicker: *ColorPicker = undefined,
-
-        pub fn init(colorPicker: *ColorPicker, offset: u16) @This() {
-            std.debug.assert(colorPicker.trueColor);
-            var self: @This() = .{};
-
-            self.colorPicker = colorPicker;
-            self.colorOffset = offset;
-
-            return self;
-        }
-
-        pub fn clearChunk(self: *@This(), chunk: []const u8) void {
-            std.debug.assert(self.at + 2 <= self.chunks.len);
-            if (chunk.len > 0) {
-                self.chunks[self.at] = self.colorPicker.reset();
-                self.chunks[self.at + 1] = chunk;
-            } else {
-                self.chunks[self.at] = "";
-                self.chunks[self.at + 1] = "";
-            }
-            self.at += 2;
-        }
-
-        pub fn coloredChunk(self: *@This(), chunk: []const u8) void {
-            std.debug.assert(self.at + 2 <= self.chunks.len);
-            if (chunk.len > 0) {
-                self.chunks[self.at] = self.colorPicker.pickColor(self.colorOffset);
-                self.chunks[self.at + 1] = chunk;
-            } else {
-                self.chunks[self.at] = "";
-                self.chunks[self.at + 1] = "";
-            }
-            self.at += 2;
-        }
-
-        pub fn skipChunk(self: *@This()) void {
-            std.debug.assert(self.at + 2 <= self.chunks.len);
-            self.chunks[self.at] = "";
-            self.chunks[self.at + 1] = "";
-            self.at += 2;
-        }
-
-        // crawls all chunks to see if there's a breakline already in there before all
-        // skipped chunks
-        pub fn breakline(self: *@This()) void {
-            std.debug.assert(self.at + 2 == size);
-            var chunk = size - 3;
-            while (chunk > 0) : (chunk -|= 2) {
-                const last = self.chunks[chunk];
-                if (last.len == 0) continue;
-
-                self.add(if (last.len > 0 and last[last.len - 1] != '\n') "\n" else "");
-                return;
-            }
-        }
-
-        pub fn add(self: *@This(), chunk: []const u8) void {
-            std.debug.assert(self.at + 2 <= self.chunks.len);
-            self.chunks[self.at] = "";
-            self.chunks[self.at + 1] = chunk;
-            self.at += 2;
-        }
-    };
-}
