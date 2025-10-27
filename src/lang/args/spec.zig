@@ -17,17 +17,11 @@ const FieldEnum = std.meta.FieldEnum;
 const TstArgCursor = argIter.TstArgCursor;
 const PrimitiveCodec = argCodec.PrimitiveCodec;
 const ArgCodec = argCodec.ArgCodec;
+const Result = @import("../result.zig").Result;
 
 // NOTE: This ties spec positionals default and helper's
 pub fn defaultPositionals() type {
     return PositionalOf(.{});
-}
-
-pub fn Result(Ok: type, Err: type) type {
-    return union(enum) {
-        Ok: Ok,
-        Err: Err,
-    };
 }
 
 pub fn SpecResponse(comptime Spec: type) type {

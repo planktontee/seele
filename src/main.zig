@@ -9,26 +9,23 @@ const fs = @import("core/fs.zig");
 const source = @import("core/source.zig");
 const mem = @import("core/mem.zig");
 
-var reporter: *const sink.Reporter = undefined;
+pub const std_options: std.Options = .{
+    .logFn = log,
+};
+
+pub fn log(
+    comptime _: std.log.Level,
+    comptime _: @TypeOf(.enum_literal),
+    comptime format: []const u8,
+    logArgs: anytype,
+) void {
+    var buffer: [64]u8 = undefined;
+    const stderr = std.debug.lockStderrWriter(&buffer);
+    defer std.debug.unlockStderrWriter();
+    nosuspend stderr.print(format ++ "\n", logArgs) catch return;
+}
 
 pub fn main() !u8 {
-    reporter = rv: {
-        var r: sink.Reporter = .{};
-        var buffOut: [units.ByteUnit.kb * 1]u8 = undefined;
-        var buffErr: [units.ByteUnit.kb * 1]u8 = undefined;
-
-        r.stdoutW = rOut: {
-            var writer = std.fs.File.stderr().writer(&buffOut);
-            break :rOut &writer.interface;
-        };
-        r.stderrW = rErr: {
-            var writer = std.fs.File.stderr().writer(&buffErr);
-            break :rErr &writer.interface;
-        };
-
-        break :rv &r;
-    };
-
     // var sfba = std.heap.stackFallback(4098, std.heap.page_allocator);
     // const allocator = sfba.get();
     // NOTE: this is completely arbitrary and currently set to no fallback for
@@ -39,23 +36,24 @@ pub fn main() !u8 {
 
     var result: args.ArgsRes = .init(allocator);
     defer result.deinit();
-    defer std.fs.File.stdout().writeAll(reporter.stdoutW.buffered()) catch unreachable;
-    defer reporter.stderrW.flush() catch unreachable;
 
     if (result.parseArgs()) |err| {
         if (err.message) |message| {
-            try reporter.stderrW.print("Last opt <{?s}>, Last token <{?s}>. ", .{
+            std.log.err("Last opt <{?s}>, Last token <{?s}>. ", .{
                 err.lastOpt,
                 err.lastToken,
             });
-            try reporter.stderrW.writeAll(message);
+            std.log.err("{s}", .{message});
             return 1;
         }
     }
 
     if (result.verb == null) result.verb = .{ .match = .initEmpty(allocator) };
 
-    try run(&result);
+    run(&result) catch |e| switch (e) {
+        regex.CompileError.BadRegex => return 1,
+        else => return e,
+    };
 
     return 0;
 }
@@ -71,14 +69,6 @@ pub const FileArgType = union(enum) {
         };
     }
 };
-
-pub const OpenError = std.fs.File.OpenError || std.posix.RealPathError;
-
-pub fn open(fileArg: []const u8) OpenError!std.fs.File {
-    var buff: [4098]u8 = undefined;
-    const filePath = try std.fs.cwd().realpath(fileArg, &buff);
-    return try std.fs.openFileAbsolute(filePath, .{ .mode = .read_only });
-}
 
 pub const FileCursor = struct {
     files: [1]FileArgType = undefined,
@@ -119,6 +109,14 @@ pub const FileCursor = struct {
         return self.current;
     }
 
+    pub const OpenError = std.fs.File.OpenError || std.posix.RealPathError;
+
+    pub fn open(fileArg: []const u8) OpenError!std.fs.File {
+        var buff: [4098]u8 = undefined;
+        const filePath = try std.fs.cwd().realpath(fileArg, &buff);
+        return try std.fs.openFileAbsolute(filePath, .{ .mode = .read_only });
+    }
+
     pub fn close(self: *@This()) void {
         std.debug.assert(self.current != null);
         self.current.?.close();
@@ -132,7 +130,7 @@ pub const RunError = error{} ||
     regex.CompileError ||
     regex.Regex.MatchError ||
     regex.RegexMatch.GroupError ||
-    OpenError ||
+    FileCursor.OpenError ||
     fs.DetectTypeError ||
     source.SourceReader.InitError ||
     source.ReadEvent.Error ||
@@ -188,7 +186,22 @@ pub fn run(argsRes: *const args.ArgsRes) RunError!void {
     }
 
     const matchPattern = argsRes.positionals.tuple.@"0";
-    var rgx = try regex.compile(matchPattern, reporter);
+    const result = try regex.compile(inputAlloc, matchPattern);
+
+    var rgx = switch (result) {
+        .Ok => |rgx| rgx,
+        .Err => |rgxErr| {
+            std.log.err(
+                "{s} [{d}]: {s}",
+                .{ @errorName(rgxErr.err), rgxErr.code, rgxErr.message },
+            );
+            rgxErr.deinit(inputAlloc);
+
+            try rgxErr.throw();
+            unreachable;
+        },
+    };
+
     defer rgx.deinit();
 
     var fileCursor = FileCursor.init(argsRes);

@@ -1,5 +1,6 @@
 const std = @import("std");
 const pcre2 = @import("c.zig").pcre2;
+const Result = @import("zpec").result.Result;
 
 pub const sink = @import("./sink.zig");
 
@@ -7,10 +8,25 @@ pub const CompileError = error{
     RegexInitFailed,
     BadRegex,
     MatchDataInitFailed,
-} || std.Io.Writer.Error;
+} || std.mem.Allocator.Error;
+
+pub const RegexError = struct {
+    code: c_int,
+    buff: []u8,
+    message: []const u8,
+    err: CompileError,
+
+    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
+        allocator.free(self.buff);
+    }
+
+    pub fn throw(self: *const @This()) CompileError!void {
+        return @as(CompileError!void, self.err);
+    }
+};
 
 // TODO: extract flags from pattern
-pub fn compile(pattern: []const u8, rpt: *const sink.Reporter) CompileError!Regex {
+pub fn compile(allocator: std.mem.Allocator, pattern: []const u8) CompileError!Result(Regex, RegexError) {
     const compContext = pcre2.pcre2_compile_context_create_8(null) orelse {
         return CompileError.RegexInitFailed;
     };
@@ -37,11 +53,17 @@ pub fn compile(pattern: []const u8, rpt: *const sink.Reporter) CompileError!Rege
         compContext,
     ) orelse {
         // TODO: make this process optional
-        var buff: [4098]u8 = undefined;
-        const end = pcre2.pcre2_get_error_message_8(err, &buff, buff.len);
-        try rpt.stderrW.print("Compile failed {d}: {s}\n", .{ errOff, buff[0..@intCast(end)] });
+        const buff = try allocator.alloc(u8, 4098);
+        const end = pcre2.pcre2_get_error_message_8(err, buff.ptr, buff.len);
 
-        return CompileError.BadRegex;
+        return .{
+            .Err = .{
+                .code = err,
+                .buff = buff,
+                .message = buff[0..@intCast(end)],
+                .err = CompileError.BadRegex,
+            },
+        };
     };
     _ = pcre2.pcre2_jit_compile_8(re, pcre2.PCRE2_JIT_COMPLETE);
 
@@ -50,9 +72,11 @@ pub fn compile(pattern: []const u8, rpt: *const sink.Reporter) CompileError!Rege
     };
 
     return .{
-        .re = re,
-        .compContext = compContext,
-        .matchData = matchData,
+        .Ok = .{
+            .re = re,
+            .compContext = compContext,
+            .matchData = matchData,
+        },
     };
 }
 
