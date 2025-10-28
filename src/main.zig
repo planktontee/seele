@@ -225,8 +225,7 @@ pub fn run(argsRes: *const args.ArgsRes) RunError!void {
         // TODO: checks for ovect[0] > ovect[1]
         // This happens when the match is partial
 
-        // TODO: checks for empty
-        // should we block this?
+        // TODO: confirm empty first match is not an issue
 
         // TODO: check for \K
         // \K handling needs partial and other types of handling for anchoring
@@ -280,7 +279,12 @@ pub fn run(argsRes: *const args.ArgsRes) RunError!void {
                                 _ = try fSink.consume(.{ .beforeMatch = line[start..group.start] });
                             }
 
-                            const res = try fSink.consume(.{
+                            const res = if (group.start == group.end) try fSink.consume(.{
+                                .emptyMatch = .{
+                                    .line = line,
+                                    .group = group,
+                                },
+                            }) else try fSink.consume(.{
                                 .match = .{
                                     .line = line,
                                     .group = group,
@@ -296,14 +300,10 @@ pub fn run(argsRes: *const args.ArgsRes) RunError!void {
                                 .eventPostponed,
                                 => {},
                                 .eventForward,
-                                => |lastIndex| {
-                                    start = lastIndex;
-                                },
+                                => |lastIndex| start = lastIndex,
                                 .eventSkipped,
                                 .eventConsumed,
-                                => {
-                                    start = group.end;
-                                },
+                                => start = group.end,
                             }
                         }
 

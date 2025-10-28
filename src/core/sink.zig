@@ -182,7 +182,7 @@ pub fn pickSinkBuffer(fDetailed: *const fs.DetailedFile, eventHandler: EventHand
 pub const GroupTracker = struct {
     colorPicker: ColorPicker,
     cursor: usize = 0,
-    group0Event: ?ExcludedMatchEvent = null,
+    group0Event: ?SimpleMatchEvent = null,
 };
 
 pub const GroupOnlyHelper = struct {
@@ -255,13 +255,14 @@ pub const MatchEvent = struct {
     targetGroup: args.TargetGroup,
 };
 
-pub const ExcludedMatchEvent = struct {
+pub const SimpleMatchEvent = struct {
     line: []const u8,
     group: regex.RegexMatchGroup,
 };
 
 pub const Events = union(enum) {
-    excludedMatch: ExcludedMatchEvent,
+    emptyMatch: SimpleMatchEvent,
+    excludedMatch: SimpleMatchEvent,
     beforeMatch: []const u8,
     match: MatchEvent,
     noMatchEndOfLineAfterMatch: []const u8,
@@ -448,6 +449,20 @@ pub const Sink = struct {
         switch (self.eventHandler) {
             .colorMatch => |*colorPicker| {
                 switch (event) {
+                    // This type doesnt have an end of line handling
+                    .emptyMatch,
+                    => |emptyMatch| {
+                        const group = emptyMatch.group;
+                        const line = emptyMatch.line;
+
+                        if (group.start == line.len - 1 and line[group.start] == '\n') {
+                            var cChunks = ColoredChunks(1).init(colorPicker, 0);
+                            cChunks.clearChunk("\n");
+                            try self.writeVecAll(&cChunks.chunks);
+                        }
+
+                        return .{ .eventForward = group.end + 1 };
+                    },
                     .excludedMatch,
                     => return .eventSkipped,
                     .beforeMatch,
@@ -489,6 +504,10 @@ pub const Sink = struct {
             },
             .coloredMatchOnly => |*groupTracker| {
                 switch (event) {
+                    .emptyMatch,
+                    => |emptyEvent| return .{
+                        .eventForward = emptyEvent.group.end + 1,
+                    },
                     .excludedMatch,
                     => |exclude| {
                         if (exclude.group.n == 0) {
@@ -613,6 +632,10 @@ pub const Sink = struct {
             // be zero fixed for non-colored match-only
             .matchOnly => {
                 switch (event) {
+                    .emptyMatch,
+                    => |emptyEvent| return .{
+                        .eventForward = emptyEvent.group.end + 1,
+                    },
                     .excludedMatch,
                     .beforeMatch,
                     => return .eventSkipped,
@@ -642,6 +665,10 @@ pub const Sink = struct {
             },
             .coloredGroupOnly => |*groupOnlyHelper| {
                 switch (event) {
+                    .emptyMatch,
+                    => |emptyEvent| return .{
+                        .eventForward = emptyEvent.group.end + 1,
+                    },
                     .excludedMatch,
                     .beforeMatch,
                     => return .eventSkipped,
@@ -684,6 +711,10 @@ pub const Sink = struct {
             },
             .groupOnly => |delimiter| {
                 switch (event) {
+                    .emptyMatch,
+                    => |emptyEvent| return .{
+                        .eventForward = emptyEvent.group.end + 1,
+                    },
                     .excludedMatch,
                     .beforeMatch,
                     => return .eventSkipped,
@@ -723,6 +754,10 @@ pub const Sink = struct {
             },
             .skipLineOnMatch => {
                 switch (event) {
+                    .emptyMatch,
+                    => |emptyEvent| return .{
+                        .eventForward = emptyEvent.group.end + 1,
+                    },
                     .excludedMatch,
                     .beforeMatch,
                     => return .eventSkipped,
@@ -746,6 +781,10 @@ pub const Sink = struct {
             },
             .pickNonMatchingLine => {
                 switch (event) {
+                    .emptyMatch,
+                    => |emptyEvent| return .{
+                        .eventForward = emptyEvent.group.end + 1,
+                    },
                     .excludedMatch,
                     .beforeMatch,
                     .match,
