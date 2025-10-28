@@ -256,8 +256,10 @@ pub const Args = struct {
     @"line-by-line": bool = true,
     @"invert-match": bool = false,
     @"match-only": bool = false,
+    @"group-only": bool = false,
 
     groups: TargetGroup = .zero,
+    @"group-delimiter": u8 = '\n',
 
     multiline: bool = false,
     recursive: bool = false,
@@ -280,8 +282,10 @@ pub const Args = struct {
         .lB = .@"line-by-line",
         .v = .@"invert-match",
         .o = .@"match-only",
+        .O = .@"group-only",
 
         .gN = .groups,
+        .gD = .@"group-delimiter",
 
         .mL = .multiline,
         .R = .recursive,
@@ -315,9 +319,11 @@ pub const Args = struct {
         .optionsDescription = &.{
             .{ .field = .@"line-by-line", .description = "Line by line matching" },
             .{ .field = .@"invert-match", .description = "Invest matches, color wont be applied" },
-            .{ .field = .@"match-only", .description = "Display only groups matched" },
+            .{ .field = .@"match-only", .description = "Display only matched text" },
+            .{ .field = .@"group-only", .description = "Display only groups matched, split by delimiter, see --group-delimiter." },
 
             .{ .field = .groups, .description = "Pick group numbers to be colored, or if -O is used, to be displayed" },
+            .{ .field = .@"group-delimiter", .description = "Change group delimiter for --group-only" },
 
             .{ .field = .multiline, .description = "Multiline matching" },
             .{ .field = .recursive, .description = "Recursively matches all files in paths" },
@@ -429,6 +435,14 @@ pub const Args = struct {
             .coloredMatchOnly,
             => {
                 if (maxGroups > 1 and self.@"group-highlight" and self.groups == .zero) {
+                    return .{ .range = .{ .start = 1, .end = maxGroups } };
+                }
+                return self.groups;
+            },
+            .coloredGroupOnly,
+            .groupOnly,
+            => {
+                if (maxGroups > 1 and self.groups == .zero) {
                     return .{ .range = .{ .start = 1, .end = maxGroups } };
                 }
                 return self.groups;

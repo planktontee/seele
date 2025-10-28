@@ -36,6 +36,8 @@ pub const PrimitiveCodec = struct {
         ParseEnumEndOfIterator,
         ParseFloatEndOfIterator,
         ParseIntEndOfIterator,
+        ParseCharEndOfIterator,
+        CharIsBiggerThan1Byte,
         ParseBoolEndOfIterator,
         InvalidEnum,
         InvalidBoolLiteral,
@@ -67,7 +69,10 @@ pub const PrimitiveCodec = struct {
 
         return try switch (@typeInfo(T)) {
             .bool => @This().parseBool(cursor),
-            .int => @This().parseInt(T, cursor),
+            .int => rv: {
+                if (T == u8) break :rv @This().parseChar(cursor);
+                break :rv @This().parseInt(T, cursor);
+            },
             .float => @This().parseFloat(T, cursor),
             .@"enum" => @This().parseEnum(T, cursor),
             .pointer => |ptr| rv: {
@@ -244,6 +249,12 @@ pub const PrimitiveCodec = struct {
         comptime ensureTypeTag(T, .int);
         const value = cursor.next() orelse return Error.ParseIntEndOfIterator;
         return try std.fmt.parseInt(T, value, 10);
+    }
+
+    pub fn parseChar(cursor: *CursorT) Error!u8 {
+        const value = cursor.next() orelse return Error.ParseCharEndOfIterator;
+        if (value.len > 1) return Error.CharIsBiggerThan1Byte;
+        return value[0];
     }
 
     pub fn parseBool(cursor: *CursorT) Error!bool {

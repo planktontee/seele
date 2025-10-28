@@ -160,11 +160,13 @@ pub fn pickSinkBuffer(fDetailed: *const fs.DetailedFile, eventHandler: EventHand
             return switch (eventHandler) {
                 .coloredMatchOnly,
                 .colorMatch,
+                .coloredGroupOnly,
                 => .{ .growing = units.CacheSize.L2 },
                 .skipLineOnMatch,
                 .pickNonMatchingLine,
                 => .directWrite,
                 .matchOnly,
+                .groupOnly,
                 => .{ .buffered = units.CacheSize.L2 },
             };
         },
@@ -183,10 +185,17 @@ pub const GroupTracker = struct {
     group0Event: ?ExcludedMatchEvent = null,
 };
 
+pub const GroupOnlyHelper = struct {
+    colorPicker: ColorPicker,
+    delimiter: u8,
+};
+
 pub const EventHandler = union(enum) {
     colorMatch: ColorPicker,
     coloredMatchOnly: GroupTracker,
+    coloredGroupOnly: GroupOnlyHelper,
     matchOnly,
+    groupOnly: u8,
     skipLineOnMatch,
     pickNonMatchingLine,
 };
@@ -207,6 +216,18 @@ pub fn pickEventHandler(fDetailed: *const fs.DetailedFile, argsRes: *const args.
                         },
                     },
                 };
+            }
+
+            if (argsRes.options.@"group-only") {
+                return switch (colorPattern) {
+                    .noColor => .{ .groupOnly = argsRes.options.@"group-delimiter" },
+                    else => .{
+                        .coloredGroupOnly = .{
+                            .colorPicker = .init(colorPattern),
+                            .delimiter = argsRes.options.@"group-delimiter",
+                        },
+                    },
+                };
             } else {
                 return switch (colorPattern) {
                     .noColor => .skipLineOnMatch,
@@ -220,6 +241,7 @@ pub fn pickEventHandler(fDetailed: *const fs.DetailedFile, argsRes: *const args.
         .pipe,
         => {
             if (argsRes.options.@"match-only") return .matchOnly;
+            if (argsRes.options.@"group-only") return .{ .groupOnly = argsRes.options.@"group-delimiter" };
             return .skipLineOnMatch;
         },
     }
@@ -613,6 +635,87 @@ pub const Sink = struct {
                     .endOfLine,
                     .endOfFile,
                     => {
+                        try self.sink();
+                        return .eventConsumed;
+                    },
+                }
+            },
+            .coloredGroupOnly => |*groupOnlyHelper| {
+                switch (event) {
+                    .excludedMatch,
+                    .beforeMatch,
+                    => return .eventSkipped,
+                    .match => |matchEvent| {
+                        const group = matchEvent.group;
+                        const endChunk = !matchEvent.targetGroup.anyGreaterThan(group.n) or matchEvent.count - 1 == group.n;
+
+                        switch (matchEvent.group.n) {
+                            0 => std.debug.assert(!matchEvent.targetGroup.anyGreaterThan(0)),
+                            else => {},
+                        }
+                        var cChunks = ColoredChunks(2).init(
+                            &groupOnlyHelper.colorPicker,
+                            @intCast(matchEvent.group.n),
+                        );
+
+                        cChunks.coloredChunk(group.slice(matchEvent.line));
+                        if (!endChunk) {
+                            cChunks.clearChunk(&.{groupOnlyHelper.delimiter});
+                        } else cChunks.breakline();
+
+                        try self.writeVecAll(&cChunks.chunks);
+
+                        return .eventConsumed;
+                    },
+                    .noMatchEndOfLineAfterMatch,
+                    .noMatchEndOfLine,
+                    .endOfMatchGroups,
+                    => return .eventSkipped,
+                    .endOfLine => {
+                        try self.sinkLine();
+                        return .eventConsumed;
+                    },
+                    .endOfFile => {
+                        try self.writeAll(groupOnlyHelper.colorPicker.reset());
+                        try self.sink();
+                        return .eventConsumed;
+                    },
+                }
+            },
+            .groupOnly => |delimiter| {
+                switch (event) {
+                    .excludedMatch,
+                    .beforeMatch,
+                    => return .eventSkipped,
+                    .match => |matchEvent| {
+                        const group = matchEvent.group;
+                        const endChunk = !matchEvent.targetGroup.anyGreaterThan(group.n) or matchEvent.count - 1 == group.n;
+
+                        switch (matchEvent.group.n) {
+                            0 => std.debug.assert(!matchEvent.targetGroup.anyGreaterThan(0)),
+                            else => {},
+                        }
+
+                        const slice = matchEvent.group.slice(matchEvent.line);
+
+                        var buff: [2][]const u8 = if (endChunk) .{
+                            slice,
+                            "\n",
+                        } else .{ slice, &.{delimiter} };
+
+                        try self.writeVecAll(&buff);
+
+                        return .eventConsumed;
+                    },
+                    .noMatchEndOfLineAfterMatch,
+                    .noMatchEndOfLine,
+                    .endOfMatchGroups,
+                    => return .eventSkipped,
+                    .endOfLine => {
+                        try self.sinkLine();
+                        return .eventConsumed;
+                    },
+                    .endOfFile => {
                         try self.sink();
                         return .eventConsumed;
                     },
