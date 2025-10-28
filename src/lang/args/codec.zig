@@ -5,6 +5,8 @@ const Allocator = std.mem.Allocator;
 const AtDepthArrayTokenizer = argIter.AtDepthArrayTokenizer;
 const TstArgCursor = argIter.TstArgCursor;
 
+pub const range = @import("extra/range.zig");
+
 pub fn ensureTypeTag(comptime T: type, comptime tag: @Type(.enum_literal)) void {
     comptime if (@typeInfo(T) != tag) @compileError(std.fmt.comptimePrint(
         "Type given to parse method is not {s}, it is {s}",
@@ -729,4 +731,10 @@ test "codec parseFlag" {
     _ = cursor.next();
     try std.testing.expect(try codec.parseByTag(.@"test", allocator, &cursor));
     try std.testing.expectEqual(null, cursor.curr);
+}
+
+test {
+    comptime {
+        _ = @import("extra/range.zig");
+    }
 }

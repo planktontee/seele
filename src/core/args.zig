@@ -20,9 +20,8 @@ const CursorT = zpec.collections.Cursor([]const u8);
 pub const ArgsCodec = struct {
     defaultCodec: DefaultCodec = .{},
 
+    const Range = args.codec.range.DecimalRange(u16);
     pub const Error = error{
-        InvalidRangeToken,
-        UnexpectedRangeTokenEnd,
         LinearItemsNotSorted,
         InvalidRange,
         RangesOverlap,
@@ -30,7 +29,9 @@ pub const ArgsCodec = struct {
         ItemOverlapsWithRange,
         EmptyTargetGroups,
         Group0NotAlone,
-    } || DefaultCodec.Error;
+    } ||
+        Range.Error ||
+        DefaultCodec.Error;
 
     pub fn supports(
         comptime T: type,
@@ -74,148 +75,45 @@ pub const ArgsCodec = struct {
         var targets = try std.ArrayListUnmanaged(RangeGroup).initCapacity(allocator.*, 3);
         errdefer targets.deinit(allocator.*);
 
-        const State = enum {
-            none,
-            digit0,
-            number,
-            range1,
-            range2,
-            numberAfterRange,
-        };
+        var rangeParser: Range = .{ .arr = arr };
 
-        var state: State = .none;
-
-        // TODO: move range tokenizer elsewhere
-        for (arr) |item| {
-            var start: u16 = 0;
-            var end: u16 = 0;
-            var n2: usize = 0;
-            var i: usize = 0;
-            stateLoop: while (true) {
-                switch (state) {
-                    .none => {
-                        if (i >= item.len) break;
-                        switch (item[i]) {
-                            '0' => {
-                                state = .digit0;
-                                i += 1;
-                                continue :stateLoop;
-                            },
-                            '1'...'9' => {
-                                state = .number;
-                                i += 1;
-                                continue :stateLoop;
-                            },
-                            else => return std.fmt.ParseIntError.InvalidCharacter,
-                        }
-                    },
-                    .digit0 => {
-                        if (i >= item.len) {
-                            start = 0;
-                            state = .number;
-                            break;
-                        }
-                        switch (item[i]) {
-                            '.' => {
-                                start = 0;
-                                i += 1;
-                                state = .range1;
-                                continue :stateLoop;
-                            },
-                            else => return Error.InvalidRangeToken,
-                        }
-                    },
-                    .number => {
-                        while (i < item.len) : (i += 1) {
-                            switch (item[i]) {
-                                '0'...'9' => continue,
-                                '.' => {
-                                    start = try std.fmt.parseInt(u16, item[0..i], 10);
-                                    i += 1;
-                                    state = .range1;
-                                    continue :stateLoop;
-                                },
-                                else => return std.fmt.ParseIntError.InvalidCharacter,
-                            }
-                        }
-                        start = try std.fmt.parseInt(u16, item[0..i], 10);
-                        break;
-                    },
-                    .range1 => {
-                        if (i >= item.len) return Error.UnexpectedEndOfInput;
-                        switch (item[i]) {
-                            '.' => {
-                                i += 1;
-                                state = .range2;
-                                continue :stateLoop;
-                            },
-                            else => return Error.InvalidRangeToken,
-                        }
-                    },
-                    .range2 => {
-                        if (i >= item.len) return Error.UnexpectedEndOfInput;
-                        switch (item[i]) {
-                            '1'...'9' => {
-                                n2 = i;
-                                i += 1;
-                                state = .numberAfterRange;
-                                continue :stateLoop;
-                            },
-                            else => return std.fmt.ParseIntError.InvalidCharacter,
-                        }
-                    },
-                    .numberAfterRange => {
-                        while (i < item.len) : (i += 1) {
-                            switch (item[i]) {
-                                '0'...'9' => {
-                                    continue;
-                                },
-                                else => return std.fmt.ParseIntError.InvalidCharacter,
-                            }
-                        }
-                        end = try std.fmt.parseInt(u16, item[n2..i], 10);
-                        break :stateLoop;
-                    },
-                }
-            }
-
-            switch (state) {
-                .number => {
+        while (true) {
+            const token = try rangeParser.next();
+            switch (token) {
+                .number => |n| {
                     if (linearIterTargets.items.len == 0) {
-                        try linearIterTargets.append(allocator.*, start);
+                        try linearIterTargets.append(allocator.*, n);
                     } else {
                         const last = linearIterTargets.items[linearIterTargets.items.len - 1];
                         if (last == 0) return Error.Group0NotAlone;
-                        if (last >= start) return Error.LinearItemsNotSorted;
-                        try linearIterTargets.append(allocator.*, start);
+                        if (last >= n) return Error.LinearItemsNotSorted;
+                        try linearIterTargets.append(allocator.*, n);
                     }
                 },
-                .numberAfterRange => {
-                    if (start >= end or start == 0) return Error.InvalidRange;
+                .range => |range| {
+                    if (range.start >= range.end or range.start == 0) return Error.InvalidRange;
 
                     if (targets.items.len == 0) {
                         try targets.append(
                             allocator.*,
-                            .{ .start = start, .end = end },
+                            .{ .start = range.start, .end = range.end },
                         );
                     } else {
                         const last = targets.items[targets.items.len - 1];
 
-                        if (last.includes(start) or
-                            last.includes(end)) return Error.RangesOverlap;
+                        if (last.includes(range.start) or
+                            last.includes(range.end)) return Error.RangesOverlap;
 
-                        if (last.end > start) return Error.RangesNotSorted;
+                        if (last.end > range.start) return Error.RangesNotSorted;
 
                         try targets.append(
                             allocator.*,
-                            .{ .start = start, .end = end },
+                            .{ .start = range.start, .end = range.end },
                         );
                     }
                 },
-                else => return Error.UnexpectedEndOfInput,
+                .done => break,
             }
-
-            state = .none;
         }
 
         if (targets.items.len == 0 and linearIterTargets.items.len == 0) return Error.EmptyTargetGroups;

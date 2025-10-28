@@ -628,46 +628,19 @@ pub const Sink = struct {
                     },
                 }
             },
-            // NOTE: this is currently wrong because targetGroups need to
-            // be zero fixed for non-colored match-only
-            .matchOnly => {
-                switch (event) {
-                    .emptyMatch,
-                    => |emptyEvent| return .{
-                        .eventForward = emptyEvent.group.end + 1,
-                    },
-                    .excludedMatch,
-                    .beforeMatch,
-                    => return .eventSkipped,
-                    .match => |matchEvent| {
-                        const slice = matchEvent.group.slice(matchEvent.line);
-
-                        if (slice.len > 0 and
-                            slice[slice.len - 1] != '\n')
-                        {
-                            var buff: [2][]const u8 = .{ slice, "\n" };
-                            try self.writeVecAll(&buff);
-                        } else try self.writeAll(slice);
-
-                        return .eventConsumed;
-                    },
-                    .noMatchEndOfLineAfterMatch,
-                    .noMatchEndOfLine,
-                    .endOfMatchGroups,
-                    => return .eventSkipped,
-                    .endOfLine,
-                    .endOfFile,
-                    => {
-                        try self.sink();
-                        return .eventConsumed;
-                    },
-                }
-            },
             .coloredGroupOnly => |*groupOnlyHelper| {
                 switch (event) {
                     .emptyMatch,
-                    => |emptyEvent| return .{
-                        .eventForward = emptyEvent.group.end + 1,
+                    => |emptyEvent| {
+                        if (emptyEvent.line[emptyEvent.group.end] != '\n') {
+                            var buff: [2][]const u8 = .{
+                                groupOnlyHelper.colorPicker.reset(),
+                                &.{groupOnlyHelper.delimiter},
+                            };
+                            try self.writeVecAll(&buff);
+                        }
+
+                        return .{ .eventForward = emptyEvent.group.end + 1 };
                     },
                     .excludedMatch,
                     .beforeMatch,
@@ -709,11 +682,50 @@ pub const Sink = struct {
                     },
                 }
             },
-            .groupOnly => |delimiter| {
+            // NOTE: this is currently wrong because targetGroups need to
+            // be zero fixed for non-colored match-only
+            .matchOnly => {
                 switch (event) {
                     .emptyMatch,
                     => |emptyEvent| return .{
                         .eventForward = emptyEvent.group.end + 1,
+                    },
+                    .excludedMatch,
+                    .beforeMatch,
+                    => return .eventSkipped,
+                    .match => |matchEvent| {
+                        const slice = matchEvent.group.slice(matchEvent.line);
+
+                        if (slice.len > 0 and
+                            slice[slice.len - 1] != '\n')
+                        {
+                            var buff: [2][]const u8 = .{ slice, "\n" };
+                            try self.writeVecAll(&buff);
+                        } else try self.writeAll(slice);
+
+                        return .eventConsumed;
+                    },
+                    .noMatchEndOfLineAfterMatch,
+                    .noMatchEndOfLine,
+                    .endOfMatchGroups,
+                    => return .eventSkipped,
+                    .endOfLine,
+                    .endOfFile,
+                    => {
+                        try self.sink();
+                        return .eventConsumed;
+                    },
+                }
+            },
+            .groupOnly => |delimiter| {
+                switch (event) {
+                    .emptyMatch,
+                    => |emptyEvent| {
+                        if (emptyEvent.line[emptyEvent.group.end] != '\n') {
+                            try self.writeAll(&.{delimiter});
+                        }
+
+                        return .{ .eventForward = emptyEvent.group.end + 1 };
                     },
                     .excludedMatch,
                     .beforeMatch,
@@ -731,7 +743,7 @@ pub const Sink = struct {
 
                         var buff: [2][]const u8 = if (endChunk) .{
                             slice,
-                            "\n",
+                            if (slice[slice.len - 1] != '\n') "\n" else "",
                         } else .{ slice, &.{delimiter} };
 
                         try self.writeVecAll(&buff);
