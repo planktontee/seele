@@ -82,9 +82,15 @@ pub fn StackFallbackAllocator(comptime size: usize) type {
                 if ((new_len - memory.len) < self.buffer.len - self.fixed_buffer_allocator.end_index) {
                     return FixedBufferAllocator.remap(&self.fixed_buffer_allocator, memory, alignment, new_len, return_address);
                 } else {
-                    const newBuff = self.fallback_allocator.alloc(u8, new_len) catch return null;
+                    const newBuff = self.fallback_allocator.rawAlloc(new_len, alignment, return_address) orelse return null;
                     @memcpy(newBuff[0..memory.len], memory);
-                    return newBuff.ptr;
+                    FixedBufferAllocator.free(
+                        &self.fixed_buffer_allocator,
+                        memory,
+                        alignment,
+                        return_address,
+                    );
+                    return newBuff;
                 }
             } else {
                 return self.fallback_allocator.rawRemap(memory, alignment, new_len, return_address);
@@ -113,4 +119,23 @@ pub fn stackFallback(comptime size: usize, fallback_allocator: Allocator) StackF
         .fallback_allocator = fallback_allocator,
         .fixed_buffer_allocator = undefined,
     };
+}
+
+test "StackFallbackAllocator" {
+    {
+        var stack_allocator = stackFallback(4096, std.testing.allocator);
+        try std.heap.testAllocator(stack_allocator.get());
+    }
+    {
+        var stack_allocator = stackFallback(4096, std.testing.allocator);
+        try std.heap.testAllocatorAligned(stack_allocator.get());
+    }
+    {
+        var stack_allocator = stackFallback(4096, std.testing.allocator);
+        try std.heap.testAllocatorLargeAlignment(stack_allocator.get());
+    }
+    {
+        var stack_allocator = stackFallback(4096, std.testing.allocator);
+        try std.heap.testAllocatorAlignedShrink(stack_allocator.get());
+    }
 }

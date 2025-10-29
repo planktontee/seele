@@ -1,4 +1,5 @@
 pub const NanoUnit = struct {
+    pub const micro = 10e2;
     pub const ms = 10e5;
     pub const s = 10e8;
 };

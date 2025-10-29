@@ -692,6 +692,31 @@ test "codec parseInt" {
     );
 }
 
+test "codec parseChar" {
+    const t = std.testing;
+    const baseAllocator = t.allocator;
+    var arena = std.heap.ArenaAllocator.init(baseAllocator);
+    defer arena.deinit();
+    const allocator = &arena.allocator();
+    var tstCursor = try TstArgCursor.init(allocator,
+        \\c
+        \\c2
+    );
+    defer tstCursor.deinit();
+    var cursor = tstCursor.asCursor();
+
+    var codec = ArgCodec(struct { c: u8 }){};
+    try t.expectEqual('c', try codec.parseByTag(.c, allocator, &cursor));
+    try t.expectError(
+        @TypeOf(codec).Error.CharIsBiggerThan1Byte,
+        codec.parseByTag(.c, allocator, &cursor),
+    );
+    try t.expectError(
+        @TypeOf(codec).Error.ParseCharEndOfIterator,
+        codec.parseByTag(.c, allocator, &cursor),
+    );
+}
+
 test "codec parseFlag" {
     const baseAllocator = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(baseAllocator);

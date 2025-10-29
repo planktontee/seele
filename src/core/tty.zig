@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub const NoColor = struct {
-    pub fn pick() []const u8 {
+    pub fn pick(_: u16) []const u8 {
         return "";
     }
 
@@ -50,6 +50,12 @@ pub const RGB = struct {
     }
 };
 
+test "RGB to escape" {
+    const t = std.testing;
+    try t.expectEqualStrings("\x1b[38;2;192;192;192m", RGB.from("#C0C0C0").escapeCode);
+    try t.expectEqualStrings("\x1b[38;2;15;192;2m", RGB.from("#0FC002").escapeCode);
+}
+
 pub const RainbowColor = struct {
     pub fn pick(offset: u16) []const u8 {
         const bucketIndex: u8 = @intCast(offset % 11);
@@ -73,6 +79,24 @@ pub const RainbowColor = struct {
         return EscapeColor.reset.escapeCode();
     }
 };
+
+test "Rainbow to escape" {
+    const t = std.testing;
+    try t.expectEqualStrings(RGB.from("#EF0000").escapeCode, RainbowColor.pick(0));
+    try t.expectEqualStrings(RGB.from("#FA8072").escapeCode, RainbowColor.pick(1));
+    try t.expectEqualStrings(RGB.from("#FFA500").escapeCode, RainbowColor.pick(2));
+    try t.expectEqualStrings(RGB.from("#FFFF00").escapeCode, RainbowColor.pick(3));
+    try t.expectEqualStrings(RGB.from("#B0FF00").escapeCode, RainbowColor.pick(4));
+    try t.expectEqualStrings(RGB.from("#00EF00").escapeCode, RainbowColor.pick(5));
+    try t.expectEqualStrings(RGB.from("#00EF80").escapeCode, RainbowColor.pick(6));
+    try t.expectEqualStrings(RGB.from("#99D9EA").escapeCode, RainbowColor.pick(7));
+    try t.expectEqualStrings(RGB.from("#0000EF").escapeCode, RainbowColor.pick(8));
+    try t.expectEqualStrings(RGB.from("#8F00FF").escapeCode, RainbowColor.pick(9));
+    try t.expectEqualStrings(RGB.from("#9400D3").escapeCode, RainbowColor.pick(10));
+    try t.expectEqualStrings(RGB.from("#EF0000").escapeCode, RainbowColor.pick(11));
+    try t.expectEqualStrings(RGB.from("#B0FF00").escapeCode, RainbowColor.pick(15));
+    try t.expectEqualStrings("\x1b[0m", RainbowColor.resetCode());
+}
 
 pub const EscapeColor = enum {
     boldRed,
@@ -112,24 +136,50 @@ pub const EscapeColor = enum {
     }
 };
 
+test "EscapeColor to escape" {
+    const t = std.testing;
+    try t.expectEqualStrings("\x1b[1;31m", EscapeColor.pick(0));
+    try t.expectEqualStrings("\x1b[1;32m", EscapeColor.pick(1));
+    try t.expectEqualStrings("\x1b[1;33m", EscapeColor.pick(2));
+    try t.expectEqualStrings("\x1b[1;34m", EscapeColor.pick(3));
+    try t.expectEqualStrings("\x1b[1;35m", EscapeColor.pick(4));
+    try t.expectEqualStrings("\x1b[1;36m", EscapeColor.pick(5));
+    try t.expectEqualStrings("\x1b[0m", EscapeColor.resetCode());
+}
+
 pub const ColorPattern = enum {
     rainbow,
     escape,
     noColor,
 
+    fn T(comptime self: @This()) type {
+        return comptime switch (self) {
+            .rainbow => RainbowColor,
+            .escape => EscapeColor,
+            .noColor => NoColor,
+        };
+    }
+
     pub fn pick(self: @This(), offset: u16) []const u8 {
         return switch (self) {
-            .rainbow => RainbowColor.pick(offset),
-            .escape => EscapeColor.pick(offset),
-            .noColor => NoColor.pick(),
+            inline else => |tag| T(tag).pick(offset),
         };
     }
 
     pub fn reset(self: @This()) []const u8 {
         return switch (self) {
-            .rainbow => RainbowColor.resetCode(),
-            .escape => EscapeColor.resetCode(),
-            .noColor => NoColor.resetCode(),
+            inline else => |tag| T(tag).resetCode(),
         };
     }
 };
+
+test "ColorPattern translation" {
+    const t = std.testing;
+    try t.expectEqualStrings(RGB.from("#EF0000").escapeCode, ColorPattern.rainbow.pick(0));
+    try t.expectEqualStrings("\x1b[1;31m", ColorPattern.escape.pick(0));
+    try t.expectEqualStrings("", ColorPattern.noColor.pick(0));
+
+    try t.expectEqualStrings("\x1b[0m", ColorPattern.rainbow.reset());
+    try t.expectEqualStrings("\x1b[0m", ColorPattern.escape.reset());
+    try t.expectEqualStrings("", ColorPattern.noColor.reset());
+}

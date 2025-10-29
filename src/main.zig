@@ -8,6 +8,7 @@ const sink = @import("core/sink.zig");
 const fs = @import("core/fs.zig");
 const source = @import("core/source.zig");
 const mem = @import("core/mem.zig");
+const limits = @import("core/limits.zig");
 
 pub const std_options: std.Options = .{
     .logFn = log,
@@ -50,10 +51,22 @@ pub fn main() !u8 {
 
     if (result.verb == null) result.verb = .{ .match = .initEmpty(allocator) };
 
-    run(&result) catch |e| switch (e) {
-        regex.CompileError.BadRegex => return 1,
-        else => return e,
-    };
+    const rlimit = try std.posix.getrlimit(.STACK);
+    inline for (@typeInfo(@TypeOf(limits.StackSizes)).@"struct".fields) |field| {
+        const fValue = field.defaultValue().?;
+        if (rlimit.cur == fValue) {
+            const fValueMb = fValue / units.ByteUnit.mb;
+            const splitSize = ((fValueMb - (fValueMb / 8) * 2) / 2) * units.ByteUnit.mb;
+
+            run(splitSize, &result) catch |e| switch (e) {
+                regex.CompileError.BadRegex => return 1,
+                else => return e,
+            };
+            break;
+        }
+    } else {
+        @panic("Stack size for partition is invalid");
+    }
 
     return 0;
 }
@@ -138,21 +151,14 @@ pub const RunError = error{} ||
     std.Io.Reader.DelimiterError ||
     std.Io.Writer.Error;
 
-pub fn run(argsRes: *const args.ArgsRes) RunError!void {
+pub fn run(comptime stackPartitionSize: usize, argsRes: *const args.ArgsRes) RunError!void {
     // NOTE: because Fba only resizes the last piece allocated, we need to split
     // the stack mem into 2 different allocators to ensure they can grow
     // Zig issues a prlimit64 for 16mb, I'm taking 12mb here for IO, probably not a good idea and wont work on OSs that return error on that call
     // For debug builds, bigger stacks were seemingly being consumed elsewhere, so I reduced
     // it to 4mb, completely arbitrarily, I will leave this here for now but I'm moving to a debug
     // allocator for Debug build instead
-    const stackPartitionSize = rv: {
-        if (builtin.mode == .Debug) {
-            break :rv units.CacheSize.L2 * 2;
-        } else {
-            break :rv units.CacheSize.L2 * 6;
-        }
-        unreachable;
-    };
+
     const DebugAlloc = std.heap.DebugAllocator(.{
         .safety = true,
     });
@@ -323,4 +329,11 @@ pub fn run(argsRes: *const args.ArgsRes) RunError!void {
     }
 
     return;
+}
+
+test {
+    comptime {
+        _ = @import("core/mem.zig");
+        _ = @import("core/tty.zig");
+    }
 }

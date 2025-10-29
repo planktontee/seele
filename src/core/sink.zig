@@ -79,13 +79,10 @@ pub fn ColoredChunks(comptime n: std.math.IntFittingRange(0, std.math.maxInt(usi
         colorPicker: *ColorPicker = undefined,
 
         pub fn init(colorPicker: *ColorPicker, offset: u16) @This() {
-            std.debug.assert(colorPicker.trueColor);
-            var self: @This() = .{};
-
-            self.colorPicker = colorPicker;
-            self.colorOffset = offset;
-
-            return self;
+            return .{
+                .colorPicker = colorPicker,
+                .colorOffset = offset,
+            };
         }
 
         pub fn clearChunk(self: *@This(), chunk: []const u8) void {

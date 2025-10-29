@@ -163,7 +163,7 @@ pub const Args = struct {
     recursive: bool = false,
     @"follow-links": bool = false,
 
-    colored: ?bool = null,
+    color: ?bool = null,
     @"group-highlight": bool = false,
 
     verbose: bool = false,
@@ -227,7 +227,7 @@ pub const Args = struct {
             .{ .field = .recursive, .description = "Recursively matches all files in paths" },
             .{ .field = .@"follow-links", .description = "Follow symlinks, using a weakref visitor" },
 
-            .{ .field = .colored, .description = "Colors matches" },
+            .{ .field = .color, .description = "Colors matches" },
             .{ .field = .@"group-highlight", .description = "Uses a color table for each group match, this will also only color group matches other than 0 unless overriden with --groups" },
 
             .{ .field = .verbose, .description = "Verbose mode" },
@@ -316,7 +316,7 @@ pub const Args = struct {
     };
 
     pub fn hasColor(self: *const @This(), fileType: fs.FileType) bool {
-        const colored = self.colored;
+        const colored = self.color;
 
         return !self.@"invert-match" and ((colored != null and colored.? == true) or
             (fileType == .tty and colored == null));
