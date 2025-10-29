@@ -83,7 +83,7 @@ pub const MmapSource = struct {
     pub fn mmapBuffer(fDetailed: *const fs.DetailedFile) MmapBufferError![]align(std.heap.page_size_min) u8 {
         return try std.posix.mmap(
             null,
-            fDetailed.stat.size,
+            @intCast(fDetailed.stat.size),
             std.posix.PROT.READ,
             .{
                 .TYPE = .SHARED,

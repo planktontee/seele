@@ -18,13 +18,12 @@ pub fn build(b: *std.Build) void {
             .{ .name = "zpec", .module = zpec },
         },
     });
-    // const pcre2_dep = b.dependency("pcre2", .{
-    //     .target = target,
-    //     .optimize = optimize,
-    //     .support_jit = true,
-    // });
-    // exe_mod.linkLibrary(pcre2_dep.artifact("pcre2-8"));
-    exe_mod.linkSystemLibrary("pcre2-8", .{});
+    const pcre2_dep = b.dependency("pcre2", .{
+        .target = target,
+        .optimize = optimize,
+        .support_jit = true,
+    });
+    exe_mod.linkLibrary(pcre2_dep.artifact("pcre2-8"));
 
     const lib = b.addLibrary(.{
         .linkage = .static,

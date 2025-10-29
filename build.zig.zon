@@ -3,7 +3,12 @@
     .version = "0.0.0",
     .fingerprint = 0x26358d069de7b90,
     .minimum_zig_version = "0.15.1",
-    .dependencies = .{},
+    .dependencies = .{
+        .pcre2 = .{
+            .url = "git+https://github.com/PCRE2Project/pcre2/#3b9197727e70bffded674d24100e7b4c80e7ef58",
+            .hash = "N-V-__8AAKXw4QA1Yjp7IiVBtaJMxAkMY99mZhb-mrxrmELA",
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",
