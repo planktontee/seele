@@ -18,6 +18,8 @@ pub fn build(b: *std.Build) void {
             .{ .name = "zpec", .module = zpec },
         },
     });
+
+    // TODO: parse zon and symlink/resolve jit inside pcre2?
     const pcre2_dep = b.dependency("pcre2", .{
         .target = target,
         .optimize = optimize,

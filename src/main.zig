@@ -335,5 +335,6 @@ test {
     comptime {
         _ = @import("core/mem.zig");
         _ = @import("core/tty.zig");
+        _ = @import("tattletale.zig");
     }
 }
