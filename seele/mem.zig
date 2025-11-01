@@ -4,7 +4,8 @@ const Alignment = std.mem.Alignment;
 const FixedBufferAllocator = std.heap.FixedBufferAllocator;
 const assert = std.debug.assert;
 
-pub fn StackFallbackAllocator(comptime size: usize) type {
+// Mostly taken from std StackFallbackAllocator
+pub fn PromotingSfba(comptime size: usize) type {
     return struct {
         const Self = @This();
 
@@ -113,8 +114,8 @@ pub fn StackFallbackAllocator(comptime size: usize) type {
     };
 }
 
-pub fn stackFallback(comptime size: usize, fallback_allocator: Allocator) StackFallbackAllocator(size) {
-    return StackFallbackAllocator(size){
+pub fn stackFallback(comptime size: usize, fallback_allocator: Allocator) PromotingSfba(size) {
+    return PromotingSfba(size){
         .buffer = undefined,
         .fallback_allocator = fallback_allocator,
         .fixed_buffer_allocator = undefined,

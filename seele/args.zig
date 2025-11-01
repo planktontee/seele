@@ -1,26 +1,26 @@
 const std = @import("std");
-const zpec = @import("zpec");
-const args = zpec.args;
-const spec = args.spec;
-const help = args.help;
-const validate = args.validate;
-const coll = zpec.collections;
+const zcasp = @import("zcasp");
+const regent = @import("regent");
+const spec = zcasp.spec;
+const help = zcasp.help;
+const validate = zcasp.validate;
+const coll = regent.collections;
 const Cursor = coll.Cursor;
 const ComptSb = coll.ComptSb;
 const HelpData = help.HelpData;
 const GroupMatchConfig = validate.GroupMatchConfig;
 const SpecResponseWithConfig = spec.SpecResponseWithConfig;
-const positionals = args.positionals;
+const positionals = zcasp.positionals;
 const fs = @import("fs.zig");
 const sink = @import("sink.zig");
 
-const DefaultCodec = args.codec.ArgCodec(Args);
-const CursorT = zpec.collections.Cursor([]const u8);
+const DefaultCodec = zcasp.codec.ArgCodec(Args);
+const CursorT = regent.collections.Cursor([]const u8);
 
 pub const ArgsCodec = struct {
     defaultCodec: DefaultCodec = .{},
 
-    const Range = args.codec.range.DecimalRange(u16);
+    const Range = zcasp.codec.range.DecimalRange(u16);
     pub const Error = error{
         LinearItemsNotSorted,
         InvalidRange,
@@ -61,8 +61,8 @@ pub const ArgsCodec = struct {
         allocator: *const std.mem.Allocator,
         cursor: *CursorT,
     ) Error!TargetGroup {
-        const arr = try args.codec.PrimitiveCodec.parseArray(
-            &args.codec.PrimitiveCodec{},
+        const arr = try zcasp.codec.PrimitiveCodec.parseArray(
+            &zcasp.codec.PrimitiveCodec{},
             []const []const u8,
             .null,
             allocator,

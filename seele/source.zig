@@ -1,6 +1,7 @@
 const std = @import("std");
-const units = @import("zpec").units;
+const units = @import("regent").units;
 const fs = @import("fs.zig");
+const c = @import("c.zig").c;
 const File = std.fs.File;
 const Reader = std.Io.Reader;
 const Writer = std.Io.Writer;
@@ -20,12 +21,6 @@ pub const SourceBuffer = union(SourceBufferType) {
 pub fn pickSourceBuffer(fDetailed: *const fs.DetailedFile) SourceBuffer {
     // NOTE: capped sources wont read more than cap even with iovecs
     switch (fDetailed.fileType) {
-        // => return .{
-        //     .growingDoubleBuffer = .{
-        //         .readBuffer = units.PipeSize,
-        //         .targetInitialSize = units.CacheSize.L3,
-        //     },
-        // },
         .generic,
         .tty,
         .pipe,
@@ -78,7 +73,7 @@ pub const MmapSource = struct {
         allocator.destroy(self);
     }
 
-    pub const MmapBufferError = std.posix.RealPathError || std.posix.MMapError;
+    pub const MmapBufferError = std.posix.MMapError || std.posix.MadviseError;
 
     pub fn mmapBuffer(fDetailed: *const fs.DetailedFile) MmapBufferError![]align(std.heap.page_size_min) u8 {
         return try std.posix.mmap(

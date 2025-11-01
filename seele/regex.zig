@@ -1,6 +1,6 @@
 const std = @import("std");
 const pcre2 = @import("c.zig").pcre2;
-const Result = @import("zpec").result.Result;
+const Result = @import("regent").result.Result;
 
 pub const sink = @import("./sink.zig");
 
@@ -44,15 +44,11 @@ pub fn compile(allocator: std.mem.Allocator, pattern: []const u8) CompileError!R
     const re = pcre2.pcre2_compile_8(
         pattern.ptr,
         pattern.len,
-        // TODO: abstract flags support
-        // NOTE: /g is actually an abstraction outside of the regex engine
         0,
-        // pcre2.PCRE2_NEVER_UCP | pcre2.PCRE2_NEVER_UTF | pcre2.PCRE2_NEVER_BACKSLASH_C | pcre2.PCRE2_EXTRA_NEVER_CALLOUT,
         &err,
         &errOff,
         compContext,
     ) orelse {
-        // TODO: make this process optional
         const buff = try allocator.alloc(u8, 4098);
         const end = pcre2.pcre2_get_error_message_8(err, buff.ptr, buff.len);
 

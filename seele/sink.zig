@@ -1,5 +1,5 @@
 const std = @import("std");
-const units = @import("zpec").units;
+const units = @import("regent").units;
 const fs = @import("fs.zig");
 const args = @import("args.zig");
 const regex = @import("regex.zig");

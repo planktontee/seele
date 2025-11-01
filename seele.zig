@@ -1,14 +1,15 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const zpec = @import("zpec");
-const units = zpec.units;
-const args = @import("core/args.zig");
-const regex = @import("core/regex.zig");
-const sink = @import("core/sink.zig");
-const fs = @import("core/fs.zig");
-const source = @import("core/source.zig");
-const mem = @import("core/mem.zig");
-const limits = @import("core/limits.zig");
+const zcasp = @import("zcasp");
+const regent = @import("regent");
+const units = regent.units;
+const args = @import("seele/args.zig");
+const regex = @import("seele/regex.zig");
+const sink = @import("seele/sink.zig");
+const fs = @import("seele/fs.zig");
+const source = @import("seele/source.zig");
+const mem = @import("seele/mem.zig");
+const limits = @import("seele/limits.zig");
 
 pub const std_options: std.Options = .{
     .logFn = log,
@@ -65,7 +66,10 @@ pub fn main() !u8 {
             break;
         }
     } else {
-        @panic("Stack size for partition is invalid");
+        run(units.ByteUnit.mb * 3, &result) catch |e| switch (e) {
+            regex.CompileError.BadRegex => return 1,
+            else => return e,
+        };
     }
 
     return 0;
@@ -331,9 +335,7 @@ pub fn run(comptime stackPartitionSize: usize, argsRes: *const args.ArgsRes) Run
     return;
 }
 
-test {
-    comptime {
-        _ = @import("core/mem.zig");
-        _ = @import("core/tty.zig");
-    }
+comptime {
+    _ = mem;
+    _ = @import("seele/tty.zig");
 }

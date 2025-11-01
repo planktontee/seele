@@ -1,5 +1,5 @@
 const std = @import("std");
-const units = @import("zpec").units;
+const units = @import("zcasp").units;
 const File = std.fs.File;
 const Reader = std.Io.Reader;
 

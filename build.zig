@@ -1,46 +1,76 @@
 const std = @import("std");
 
-pub fn build(b: *std.Build) void {
+pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const zpec = b.addModule("zpec", .{
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
 
-    const exe_mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+    const module = b.addModule("seele", .{
+        .root_source_file = b.path("seele.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{
-            .{ .name = "zpec", .module = zpec },
-        },
     });
+    module.addImport("regent", b.dependency("regent", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("regent"));
+    module.addImport("zcasp", b.dependency("zcasp", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("zcasp"));
 
-    // TODO: parse zon and symlink/resolve jit inside pcre2?
     const pcre2_dep = b.dependency("pcre2", .{
         .target = target,
         .optimize = optimize,
         .support_jit = true,
     });
-    exe_mod.linkLibrary(pcre2_dep.artifact("pcre2-8"));
 
-    const lib = b.addLibrary(.{
-        .linkage = .static,
-        .name = "zpec",
-        .root_module = zpec,
+    // TODO: find a better way of doing this
+    var sljitTargetBuff: std.ArrayList(u8) = .empty;
+    try sljitTargetBuff.print(b.allocator, "{s}/deps/sljit", .{
+        pcre2_dep.path(".").getPath(b),
+    });
+    const sljitPathTarget = try sljitTargetBuff.toOwnedSlice(b.allocator);
+
+    const sljit = b.dependency("sljit", .{
+        .target = target,
+        .optimize = optimize,
     });
 
-    b.installArtifact(lib);
+    var rCode: u8 = undefined;
+    _ = pcre2_dep.builder.runAllowFail(
+        &.{
+            "rmdir",
+            sljitPathTarget,
+        },
+        &rCode,
+        .Close,
+    ) catch {};
+    _ = pcre2_dep.builder.runAllowFail(
+        &.{
+            "ln",
+            "-s",
+            sljit.path(".").getPath(b),
+            sljitPathTarget,
+        },
+        &rCode,
+        .Close,
+    ) catch {};
+    module.linkLibrary(pcre2_dep.artifact("pcre2-8"));
+
+    const unit_tests = b.addTest(.{
+        .root_module = module,
+    });
+    const run_unit_tests = b.addRunArtifact(unit_tests);
+
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_unit_tests.step);
 
     const exe = b.addExecutable(.{
-        .name = "seeksub",
-        .root_module = exe_mod,
+        .name = "seele",
+        .root_module = module,
         .use_llvm = true,
     });
-
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -53,20 +83,4 @@ pub fn build(b: *std.Build) void {
 
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
-
-    const lib_unit_tests = b.addTest(.{
-        .root_module = zpec,
-    });
-
-    const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
-
-    const exe_unit_tests = b.addTest(.{
-        .root_module = exe_mod,
-    });
-
-    const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
-
-    const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_lib_unit_tests.step);
-    test_step.dependOn(&run_exe_unit_tests.step);
 }
