@@ -258,7 +258,7 @@ pub const SimpleMatchEvent = struct {
 };
 
 pub const Events = union(enum) {
-    emptyMatch: SimpleMatchEvent,
+    emptyMatch: MatchEvent,
     excludedMatch: SimpleMatchEvent,
     beforeMatch: []const u8,
     match: MatchEvent,
@@ -629,7 +629,13 @@ pub const Sink = struct {
                 switch (event) {
                     .emptyMatch,
                     => |emptyEvent| {
-                        if (emptyEvent.line[emptyEvent.group.end] != '\n') {
+                        if (!emptyEvent.targetGroup.anyGreaterThan(emptyEvent.group.n)) {
+                            var buff: [2][]const u8 = .{
+                                groupOnlyHelper.colorPicker.reset(),
+                                "\n",
+                            };
+                            try self.writeVecAll(&buff);
+                        } else {
                             var buff: [2][]const u8 = .{
                                 groupOnlyHelper.colorPicker.reset(),
                                 &.{groupOnlyHelper.delimiter},
@@ -679,8 +685,6 @@ pub const Sink = struct {
                     },
                 }
             },
-            // NOTE: this is currently wrong because targetGroups need to
-            // be zero fixed for non-colored match-only
             .matchOnly => {
                 switch (event) {
                     .emptyMatch,
@@ -718,7 +722,9 @@ pub const Sink = struct {
                 switch (event) {
                     .emptyMatch,
                     => |emptyEvent| {
-                        if (emptyEvent.line[emptyEvent.group.end] != '\n') {
+                        if (!emptyEvent.targetGroup.anyGreaterThan(emptyEvent.group.n)) {
+                            try self.writeAll("\n");
+                        } else {
                             try self.writeAll(&.{delimiter});
                         }
 

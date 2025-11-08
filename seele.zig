@@ -293,6 +293,8 @@ pub fn run(comptime stackPartitionSize: usize, argsRes: *const args.ArgsRes) Run
                                 .emptyMatch = .{
                                     .line = line,
                                     .group = group,
+                                    .count = matchData.count,
+                                    .targetGroup = targetGroup,
                                 },
                             }) else try fSink.consume(.{
                                 .match = .{
