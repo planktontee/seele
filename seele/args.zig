@@ -166,6 +166,7 @@ pub const Args = struct {
     color: ?bool = null,
     @"group-highlight": bool = false,
 
+    trace: bool = false,
     verbose: bool = false,
     byteRanges: ?[]const []const usize = null,
 
@@ -230,6 +231,7 @@ pub const Args = struct {
             .{ .field = .color, .description = "Colors matches" },
             .{ .field = .@"group-highlight", .description = "Uses a color table for each group match, this will also only color group matches other than 0 unless overriden with --groups" },
 
+            .{ .field = .trace, .description = "Enabled event trace " },
             .{ .field = .verbose, .description = "Verbose mode" },
             .{ .field = .byteRanges, .description = "Range of bytes for n files, top-level array length has to be of (len <= files.len) and will be applied sequentially over files" },
         },
@@ -326,7 +328,7 @@ pub const Args = struct {
         InvalidGroupsForOptions,
     };
 
-    pub fn targetGroup(self: *const @This(), fSink: *const sink.Sink, maxGroups: usize) TargetGroupError!TargetGroup {
+    pub fn targetGroup(self: *const @This(), fSink: anytype, maxGroups: usize) TargetGroupError!TargetGroup {
         switch (fSink.eventHandler) {
             // Deciding whether or not to use colors is on the event handler
             .colorMatch,
