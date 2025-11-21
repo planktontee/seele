@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = std.debug.assert;
 const pcre2 = @import("c.zig").pcre2;
 const Result = @import("regent").result.Result;
 
@@ -132,11 +133,11 @@ pub const Regex = struct {
 };
 
 pub const RegexMatchGroup = struct {
-    n: usize,
+    n: u16,
     start: usize,
     end: usize,
 
-    pub fn init(n: usize, start: usize, end: usize) @This() {
+    pub fn init(n: u16, start: usize, end: usize) @This() {
         return .{
             .n = n,
             .start = start,
@@ -147,17 +148,31 @@ pub const RegexMatchGroup = struct {
     pub fn slice(self: *const @This(), data: []const u8) []const u8 {
         return data[self.start..self.end];
     }
+
+    pub fn format(
+        self: *const @This(),
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
+        try writer.print(".{c} .n {d} [{d}..{d}] {c}", .{
+            '{',
+            self.n,
+            self.start,
+            self.end,
+            '}',
+        });
+    }
 };
 
 pub const RegexMatch = struct {
     ovector: []const usize,
-    count: usize,
+    count: u16,
 
     pub fn init(ovector: [*c]usize, length: usize) @This() {
         const slice = ovector[0 .. length * 2];
+        assert(slice.len / 2 <= std.math.maxInt(u16));
         return .{
             .ovector = slice,
-            .count = slice.len / 2,
+            .count = @intCast(slice.len / 2),
         };
     }
 
@@ -167,6 +182,7 @@ pub const RegexMatch = struct {
     };
 
     pub fn group(self: *const @This(), n: usize) GroupError!RegexMatchGroup {
+        assert(n <= std.math.maxInt(u16));
         if (n + 1 > self.count) return GroupError.InvalidGroup;
         const start = n * 2;
         const end = n * 2 + 1;
@@ -174,8 +190,8 @@ pub const RegexMatch = struct {
         if (idx0 == pcre2.PCRE2_UNSET) return GroupError.GroupSkipped;
         const idx1 = self.ovector[end];
 
-        std.debug.assert(idx0 != pcre2.PCRE2_UNSET);
-        std.debug.assert(idx1 != pcre2.PCRE2_UNSET);
-        return .init(n, idx0, idx1);
+        assert(idx0 != pcre2.PCRE2_UNSET);
+        assert(idx1 != pcre2.PCRE2_UNSET);
+        return .init(@intCast(n), idx0, idx1);
     }
 };

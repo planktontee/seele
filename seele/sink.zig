@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = std.debug.assert;
 const units = @import("regent").units;
 const fs = @import("fs.zig");
 const args = @import("args.zig");
@@ -6,165 +7,107 @@ const regex = @import("regex.zig");
 const tty = @import("tty.zig");
 const File = std.fs.File;
 const Writer = std.Io.Writer;
+const color = @import("color.zig");
+const ColorPicker = color.ColorPicker;
+const ColoredChunks = color.ColoredChunks;
 
-pub const ColorPicker = struct {
-    colorPattern: tty.ColorPattern = .escape,
-    trueColor: bool,
-    state: State = .reset,
+pub const SinkBufferT = @typeInfo(SinkBuffer).@"union".tag_type.?;
 
-    pub const State = union(enum) {
-        reset,
-        color: u16,
-
-        pub fn eql(self: @This(), other: @This()) bool {
-            return switch (self) {
-                .reset => switch (other) {
-                    .reset => true,
-                    .color => false,
-                },
-                .color => |offset| switch (other) {
-                    .reset => false,
-                    .color => offset == other.color,
-                },
-            };
-        }
-    };
-
-    pub fn init(colorPattern: tty.ColorPattern) @This() {
-        return .{
-            .colorPattern = colorPattern,
-            .trueColor = hasTrueColor(colorPattern),
-        };
-    }
-
-    pub fn hasTrueColor(colorPattern: tty.ColorPattern) bool {
-        if (colorPattern == .noColor) return false;
-
-        if (std.posix.getenv("COLORTERM")) |colorterm| {
-            return std.mem.eql(u8, colorterm, "truecolor");
-        }
-        return false;
-    }
-
-    pub fn reset(self: *@This()) []const u8 {
-        if (self.state.eql(.reset)) return "";
-        self.state = .reset;
-        return self.colorPattern.reset();
-    }
-
-    pub fn pickColor(self: *@This(), offset: u16) []const u8 {
-        const target: State = .{ .color = offset };
-        if (self.state.eql(target)) return "";
-        self.state = target;
-
-        return rfd: switch (self.colorPattern) {
-            .rainbow => rv: {
-                if (!self.trueColor) {
-                    self.colorPattern = .escape;
-                    continue :rfd .escape;
-                }
-                break :rv self.colorPattern.pick(offset);
-            },
-            else => self.colorPattern.pick(offset),
-        };
-    }
-};
-
-pub fn ColoredChunks(comptime n: std.math.IntFittingRange(0, std.math.maxInt(usize) / 2)) type {
-    const size = n * 2;
-    return struct {
-        colorOffset: u16 = undefined,
-        chunks: [size][]const u8 = undefined,
-        at: usize = 0,
-        colorPicker: *ColorPicker = undefined,
-
-        pub fn init(colorPicker: *ColorPicker, offset: u16) @This() {
-            return .{
-                .colorPicker = colorPicker,
-                .colorOffset = offset,
-            };
-        }
-
-        pub fn clearChunk(self: *@This(), chunk: []const u8) void {
-            std.debug.assert(self.at + 2 <= self.chunks.len);
-            if (chunk.len > 0) {
-                self.chunks[self.at] = self.colorPicker.reset();
-                self.chunks[self.at + 1] = chunk;
-            } else {
-                self.chunks[self.at] = "";
-                self.chunks[self.at + 1] = "";
-            }
-            self.at += 2;
-        }
-
-        pub fn coloredChunk(self: *@This(), chunk: []const u8) void {
-            std.debug.assert(self.at + 2 <= self.chunks.len);
-            if (chunk.len > 0) {
-                self.chunks[self.at] = self.colorPicker.pickColor(self.colorOffset);
-                self.chunks[self.at + 1] = chunk;
-            } else {
-                self.chunks[self.at] = "";
-                self.chunks[self.at + 1] = "";
-            }
-            self.at += 2;
-        }
-
-        pub fn skipChunk(self: *@This()) void {
-            std.debug.assert(self.at + 2 <= self.chunks.len);
-            self.chunks[self.at] = "";
-            self.chunks[self.at + 1] = "";
-            self.at += 2;
-        }
-
-        // crawls all chunks to see if there's a breakline already in there before all
-        // skipped chunks
-        pub fn breakline(self: *@This()) void {
-            std.debug.assert(self.at + 2 == size);
-            var chunk = size - 3;
-            while (chunk > 0) : (chunk -|= 2) {
-                const last = self.chunks[chunk];
-                if (last.len == 0) continue;
-
-                self.add(if (last.len > 0 and last[last.len - 1] != '\n') "\n" else "");
-                return;
-            }
-        }
-
-        pub fn add(self: *@This(), chunk: []const u8) void {
-            std.debug.assert(self.at + 2 <= self.chunks.len);
-            self.chunks[self.at] = "";
-            self.chunks[self.at + 1] = chunk;
-            self.at += 2;
-        }
-    };
-}
-
-pub const SinkBufferType = enum {
-    growing,
-    buffered,
-    directWrite,
-};
-
-pub const SinkBuffer = union(SinkBufferType) {
+pub const SinkBuffer = union(enum) {
     growing: usize,
     buffered: usize,
+    // This performs 2 syscall writes on the last line if there's no
+    // \n in the line
     directWrite,
 };
 
+pub const EventHanderT = @typeInfo(EventHandler).@"union".tag_type.?;
+
+// TODO: use pointers
+pub const EventHandler = union(enum) {
+    matchInLine: ColorPicker,
+    matchOnly: ColorPicker,
+    groupOnly: GroupOnlyHelper,
+    lineOnMatch: ColorPicker,
+    nonMatchingLine: ColorPicker,
+};
+
+pub inline fn isEmptyGroup(group: *const regex.RegexMatchGroup) bool {
+    return group.start == group.end;
+}
+
+pub inline fn isEmptyGroup0(group: *const regex.RegexMatchGroup) bool {
+    return group.n == 0 and isEmptyGroup(group);
+}
+
+pub inline fn isEOL(group: *const regex.RegexMatchGroup, line: []const u8) bool {
+    return group.start == line.len - 1;
+}
+
+pub inline fn isEOLBreakline(group: *const regex.RegexMatchGroup, line: []const u8) bool {
+    return isEOL(group, line) and line[group.start] == '\n';
+}
+
+pub fn pickEventHandler(fDetailed: *const fs.DetailedFile, argsRes: *const args.ArgsRes) EventHandler {
+    if (argsRes.options.@"invert-match") return .{ .nonMatchingLine = .init(.noColor) };
+
+    switch (fDetailed.fileType) {
+        .tty => {
+            const colorPattern: tty.ColorPattern = if (argsRes.options.hasColor(fDetailed.fileType))
+                .escape
+            else
+                .noColor;
+            const colorPicker: ColorPicker = .init(colorPattern);
+
+            if (argsRes.options.@"match-only") {
+                return .{ .matchOnly = colorPicker };
+            }
+
+            if (argsRes.options.@"group-only") {
+                return .{
+                    .groupOnly = .{
+                        .colorPicker = colorPicker,
+                        .delimiter = argsRes.options.@"group-delimiter",
+                    },
+                };
+            } else {
+                return switch (colorPattern) {
+                    .noColor => .{ .lineOnMatch = colorPicker },
+                    else => .{ .matchInLine = colorPicker },
+                };
+            }
+        },
+        .generic,
+        .characterDevice,
+        .file,
+        .pipe,
+        => {
+            if (argsRes.options.@"match-only") return .{ .matchOnly = .init(.noColor) };
+            if (argsRes.options.@"group-only") return .{
+                .groupOnly = .{
+                    .colorPicker = .init(.noColor),
+                    .delimiter = argsRes.options.@"group-delimiter",
+                },
+            };
+            return .{ .lineOnMatch = .init(.noColor) };
+        },
+    }
+    unreachable;
+}
+
+// TODO: handle pipe sizes adequatedly
+// handle /dev/null as no-op write
 pub fn pickSinkBuffer(fDetailed: *const fs.DetailedFile, eventHandler: EventHandler) SinkBuffer {
     switch (fDetailed.fileType) {
         .tty => {
             return switch (eventHandler) {
-                .coloredMatchOnly,
-                .colorMatch,
-                .coloredGroupOnly,
-                => .{ .growing = units.CacheSize.L2 },
-                .skipLineOnMatch,
-                .pickNonMatchingLine,
-                => .directWrite,
+                .matchInLine,
                 .matchOnly,
                 .groupOnly,
-                => .{ .buffered = units.CacheSize.L2 },
+                => .{ .growing = units.CacheSize.L2 },
+                .lineOnMatch,
+                .nonMatchingLine,
+                => .directWrite,
             };
         },
         .generic,
@@ -175,6 +118,11 @@ pub fn pickSinkBuffer(fDetailed: *const fs.DetailedFile, eventHandler: EventHand
     }
     unreachable;
 }
+
+pub const EolEvent = struct {
+    charOpt: ?u8,
+    hadMatches: bool,
+};
 
 pub const GroupTracker = struct {
     colorPicker: ColorPicker,
@@ -187,97 +135,32 @@ pub const GroupOnlyHelper = struct {
     delimiter: u8,
 };
 
-pub const EventHandler = union(enum) {
-    colorMatch: ColorPicker,
-    coloredMatchOnly: GroupTracker,
-    coloredGroupOnly: GroupOnlyHelper,
-    matchOnly,
-    groupOnly: u8,
-    skipLineOnMatch,
-    pickNonMatchingLine,
-};
-
-pub fn pickEventHandler(fDetailed: *const fs.DetailedFile, argsRes: *const args.ArgsRes) EventHandler {
-    if (argsRes.options.@"invert-match") return .pickNonMatchingLine;
-
-    switch (fDetailed.fileType) {
-        .tty => {
-            const colorPattern: tty.ColorPattern = if (argsRes.options.hasColor(fDetailed.fileType)) .escape else .noColor;
-
-            if (argsRes.options.@"match-only") {
-                return switch (colorPattern) {
-                    .noColor => .matchOnly,
-                    else => .{
-                        .coloredMatchOnly = .{
-                            .colorPicker = .init(colorPattern),
-                        },
-                    },
-                };
-            }
-
-            if (argsRes.options.@"group-only") {
-                return switch (colorPattern) {
-                    .noColor => .{ .groupOnly = argsRes.options.@"group-delimiter" },
-                    else => .{
-                        .coloredGroupOnly = .{
-                            .colorPicker = .init(colorPattern),
-                            .delimiter = argsRes.options.@"group-delimiter",
-                        },
-                    },
-                };
-            } else {
-                return switch (colorPattern) {
-                    .noColor => .skipLineOnMatch,
-                    else => .{ .colorMatch = .init(colorPattern) },
-                };
-            }
-        },
-        .generic,
-        .characterDevice,
-        .file,
-        .pipe,
-        => {
-            if (argsRes.options.@"match-only") return .matchOnly;
-            if (argsRes.options.@"group-only") return .{ .groupOnly = argsRes.options.@"group-delimiter" };
-            return .skipLineOnMatch;
-        },
-    }
-    unreachable;
-}
-
 pub const MatchEvent = struct {
     line: []const u8,
     group: regex.RegexMatchGroup,
-    count: usize,
-    targetGroup: args.TargetGroup,
+    hasMore: bool,
 
     pub fn format(
         self: *const @This(),
         writer: *std.Io.Writer,
     ) std.Io.Writer.Error!void {
         try writer.writeAll(".{ .line ");
-        const end = if (self.group.end > 0 and self.group.start != self.group.end) self.group.end - 1 else self.group.end;
-        for (self.line, 0..) |c, i| {
-            if (i == self.group.start)
-                try writer.writeAll("⌈");
+        const end = if (self.group.end > 0 and self.group.start != self.group.end)
+            self.group.end - 1
+        else
+            self.group.end;
+        try Event.formatSlice(
+            writer,
+            self.line,
+            Event.SliceFormatMode.init(.{
+                .start = self.group.start,
+                .end = end,
+            }),
+        );
 
-            if (c == '\n')
-                try writer.writeAll("␊")
-            else
-                try writer.writeByte(c);
-
-            if (i == end)
-                try writer.writeAll("⌋");
-        }
-
-        try writer.print(" .{c} group {d} [{d}..{d}] {c} .count {d} .targetGroup .{s} {c}", .{
-            '{',
-            self.group.n,
-            self.group.start,
-            self.group.end,
-            '}',
-            self.count,
-            @tagName(self.targetGroup),
+        try writer.print(" {f} .hasMore {any} {c}", .{
+            self.group,
+            self.hasMore,
             '}',
         });
     }
@@ -292,64 +175,84 @@ pub const SimpleMatchEvent = struct {
         writer: *std.Io.Writer,
     ) std.Io.Writer.Error!void {
         try writer.writeAll(".{ .line ");
-        const end = if (self.group.end > 0 and self.group.start != self.group.end) self.group.end - 1 else self.group.end;
-        for (self.line, 0..) |c, i| {
-            if (i == self.group.start)
-                try writer.writeAll("⌈");
+        const end = if (self.group.end > 0 and self.group.start != self.group.end)
+            self.group.end - 1
+        else
+            self.group.end;
+        try Event.formatSlice(
+            writer,
+            self.line,
+            Event.SliceFormatMode.init(.{
+                .start = self.group.start,
+                .end = end,
+            }),
+        );
 
-            if (c == '\n')
-                try writer.writeAll("␊")
-            else
-                try writer.writeByte(c);
-
-            if (i == end)
-                try writer.writeAll("⌋");
-        }
-
-        try writer.print(" .{c} group {d} [{d}..{d}] {c} {c}", .{
-            '{',
-            self.group.n,
-            self.group.start,
-            self.group.end,
-            '}',
-            '}',
-        });
+        try writer.print(" {f} {c}", .{ self.group, '}' });
     }
 };
 
-pub const Events = union(enum) {
-    emptyMatch: MatchEvent,
-    excludedMatch: SimpleMatchEvent,
-    beforeMatch: []const u8,
-    match: MatchEvent,
-    noMatchEndOfLineAfterMatch: []const u8,
-    noMatchEndOfLine: []const u8,
-    endOfMatchGroups,
-    endOfLine,
-    endOfFile,
+pub const BeforeGroup = struct {
+    slice: []const u8,
+    n: u16,
+};
+
+pub const EndOfGroups = struct {
+    hadBreakline: bool,
+    group0Empty: bool,
+    sliceOpt: ?[]const u8,
+};
+
+// TODO: use pointers
+pub const Event = union(enum) {
+    emptyGroup: MatchEvent,
+    excludedGroup: MatchEvent,
+    beforeGroup: BeforeGroup,
+    groupMatch: MatchEvent,
+    afterMatch: []const u8,
+    noMatch: []const u8,
+    endOfGroups: EndOfGroups,
+    eol: EolEvent,
+    eof,
 
     pub fn format(
         self: *const @This(),
         writer: *std.Io.Writer,
     ) std.Io.Writer.Error!void {
         switch (self.*) {
-            .endOfMatchGroups,
-            .endOfLine,
-            .endOfFile,
-            => try writer.print(".{s}", .{@tagName(self.*)}),
-            .noMatchEndOfLineAfterMatch,
-            .noMatchEndOfLine,
-            .beforeMatch,
-            => |s| {
-                try writer.writeAll(".");
-                try writer.writeAll(@tagName(self.*));
-                try writer.writeAll(" ");
-                for (s) |c| {
-                    if (c == '\n')
-                        try writer.writeAll("␊")
-                    else
-                        try writer.writeByte(c);
+            .endOfGroups,
+            => |endOfGroups| {
+                try writer.print(".{s} {c} .sliceOpt ", .{ @tagName(self.*), '{' });
+                if (endOfGroups.sliceOpt) |reminder| {
+                    try formatSlice(writer, reminder, .noColor);
+                } else try writer.writeAll("null");
+                try writer.print(" .hadBreakline {any} .group0Empty {any} {c}", .{
+                    endOfGroups.hadBreakline,
+                    endOfGroups.group0Empty,
+                    '}',
+                });
+            },
+            .eol,
+            => |eolEvent| {
+                try writer.print(".{s}", .{@tagName(self.*)});
+                if (eolEvent.charOpt) |char| {
+                    try writer.print(" .charOpt {s}", .{Event.translateChar(char)});
                 }
+                try writer.print(" .hadMatches {any}", .{eolEvent.hadMatches});
+            },
+            .eof,
+            => try writer.print(".{s}", .{@tagName(self.*)}),
+            .afterMatch,
+            .noMatch,
+            => |s| {
+                try writer.print(".{s} ", .{@tagName(self.*)});
+                try formatSlice(writer, s, .noColor);
+            },
+            .beforeGroup,
+            => |before| {
+                try writer.print(".{s} {c} .slice ", .{ @tagName(self.*), '{' });
+                try formatSlice(writer, before.slice, .noColor);
+                try writer.print(" .n {d} {c}", .{ before.n, '}' });
             },
             inline else => |t| {
                 try writer.writeAll(".");
@@ -357,6 +260,161 @@ pub const Events = union(enum) {
                 try writer.print(" {f} ", .{t});
             },
         }
+    }
+
+    pub const SliceFormatMode = union(enum) {
+        marked: CharMarked,
+        colored: ColoredMark,
+        noColor,
+
+        const ColoredStub: @This() = .{
+            .colored = .{
+                .mark = undefined,
+                .color = tty.RainbowColor.pick(11),
+                .reset = tty.EscapeColor.reset.escapeCode(),
+                .open = '<',
+                .close = '>',
+            },
+        };
+
+        const CharStub: @This() = .{
+            .marked = .{
+                .mark = undefined,
+                .open = '<',
+                .close = '>',
+            },
+        };
+
+        pub fn init(mark: Mark) @This() {
+            // NOTE: this will be incredibly wasteful
+            // move to sink later as part of the trace mode
+            const fileType: fs.FileType = rv: {
+                const detailedFile = fs.DetailedFile.from(std.fs.File.stderr()) catch
+                    break :rv .file;
+                break :rv detailedFile.fileType;
+            };
+            switch (fileType) {
+                .tty => {
+                    var mode = ColoredStub;
+                    mode.colored.mark = mark;
+                    return mode;
+                },
+                else => {
+                    var mode = CharStub;
+                    mode.marked.mark = mark;
+                    return mode;
+                },
+            }
+            unreachable;
+        }
+
+        pub const CharMarked = struct {
+            mark: Mark,
+            open: u8,
+            close: u8,
+
+            pub fn markOpen(
+                self: *const @This(),
+                writer: *Writer,
+                i: usize,
+            ) Writer.Error!void {
+                if (i == self.mark.start) try writer.writeAll(&.{self.open});
+            }
+
+            pub fn markClose(
+                self: *const @This(),
+                writer: *Writer,
+                i: usize,
+            ) Writer.Error!void {
+                if (i == self.mark.end) try writer.writeAll(&.{self.close});
+            }
+        };
+
+        pub const ColoredMark = struct {
+            mark: Mark,
+            color: []const u8,
+            reset: []const u8,
+            open: u8,
+            close: u8,
+
+            pub fn markOpen(
+                self: *const @This(),
+                writer: *Writer,
+                i: usize,
+            ) Writer.Error!void {
+                if (i == self.mark.start) {
+                    var buff: [3][]const u8 = .{
+                        self.color,
+                        &.{self.open},
+                        self.reset,
+                    };
+                    try writer.writeVecAll(&buff);
+                }
+            }
+
+            pub fn markClose(
+                self: *const @This(),
+                writer: *Writer,
+                i: usize,
+            ) Writer.Error!void {
+                if (i == self.mark.end) {
+                    var buff: [3][]const u8 = .{
+                        self.color,
+                        &.{self.close},
+                        self.reset,
+                    };
+                    try writer.writeVecAll(&buff);
+                }
+            }
+        };
+
+        pub const Mark = struct {
+            start: usize,
+            end: usize,
+        };
+
+        pub fn markOpen(
+            self: *const @This(),
+            writer: *Writer,
+            i: usize,
+        ) Writer.Error!void {
+            switch (self.*) {
+                .noColor => {},
+                inline else => |mark| try mark.markOpen(writer, i),
+            }
+        }
+
+        pub fn markClose(
+            self: *const @This(),
+            writer: *Writer,
+            i: usize,
+        ) Writer.Error!void {
+            switch (self.*) {
+                .noColor => {},
+                inline else => |mark| try mark.markClose(writer, i),
+            }
+        }
+    };
+
+    pub fn formatSlice(
+        writer: *Writer,
+        slice: []const u8,
+        mode: SliceFormatMode,
+    ) Writer.Error!void {
+        try writer.writeAll("⌈");
+        for (slice, 0..) |c, i| {
+            try mode.markOpen(writer, i);
+            try writer.writeAll(translateChar(c));
+            try mode.markClose(writer, i);
+        }
+        try writer.writeAll("⌋");
+    }
+
+    pub fn translateChar(c: u8) []const u8 {
+        return switch (c) {
+            '\n' => "␊",
+            else => &.{c},
+        };
     }
 };
 
@@ -391,7 +449,7 @@ pub const BufferOwnedWriter = struct {
     }
 };
 
-pub const SinkWriter = union(SinkBufferType) {
+pub const SinkWriter = union(SinkBufferT) {
     growing: *GrowingWriter,
     buffered: File.Writer,
     directWrite: File.Writer,
@@ -437,568 +495,569 @@ pub const SinkWriter = union(SinkBufferType) {
     }
 };
 
-pub const SinkConfig = struct {
-    mode: Mode = .release,
-};
-
 pub const Mode = enum {
     trace,
     release,
 };
 
-pub fn Sink(comptime config: SinkConfig) type {
-    return struct {
-        fileType: fs.FileType,
-        eventHandler: EventHandler,
-        colorEnabled: bool = false,
-        sinkWriter: SinkWriter,
+// TODO: make interface call better
+// should it be an actual vtable?
+pub const Sink = struct {
+    fileType: fs.FileType,
+    eventHandler: EventHandler,
+    colorEnabled: bool = false,
+    sinkWriter: SinkWriter,
 
-        pub fn init(
-            fDetailed: *const fs.DetailedFile,
-            allocator: std.mem.Allocator,
-            argsRes: *const args.ArgsRes,
-        ) SinkWriter.InitError!@This() {
-            const eventHandler = pickEventHandler(
-                fDetailed,
-                argsRes,
-            );
-            return .{
-                .fileType = fDetailed.fileType,
-                .eventHandler = eventHandler,
-                .sinkWriter = try .init(fDetailed, allocator, eventHandler),
-            };
-        }
-
-        pub fn writeAll(self: *@This(), data: []const u8) Writer.Error!void {
-            switch (self.sinkWriter) {
-                .growing,
-                => |w| {
-                    try w.writer().writeAll(data);
-                },
-                .buffered,
-                .directWrite,
-                => |*w| {
-                    try w.interface.writeAll(data);
-                },
-            }
-        }
-
-        pub fn writeVecAll(self: *@This(), data: [][]const u8) Writer.Error!void {
-            switch (self.sinkWriter) {
-                .growing,
-                => |w| {
-                    try w.writer().writeVecAll(data);
-                },
-                .buffered,
-                .directWrite,
-                => |*w| {
-                    try w.interface.writeVecAll(data);
-                },
-            }
-        }
-
-        pub fn sinkLine(self: *@This()) Writer.Error!void {
-            // TODO: do I need a flush strategy too?
-            switch (self.fileType) {
-                .tty => {
-                    switch (self.sinkWriter) {
-                        .growing => |alloc| try alloc.flush(),
-                        .buffered,
-                        => |*w| try w.interface.flush(),
-                        .directWrite,
-                        => {},
-                    }
-                },
-                else => {},
-            }
-        }
-
-        pub fn sink(self: *@This()) Writer.Error!void {
-            switch (self.sinkWriter) {
-                .growing => |w| try w.flush(),
-                .buffered => |*w| try w.interface.flush(),
-                .directWrite => {},
-            }
-        }
-
-        pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
-            switch (self.sinkWriter) {
-                .growing,
-                => |w| w.deinit(allocator),
-                .buffered,
-                .directWrite,
-                => |*w| {
-                    if (w.interface.buffer.len > 0) {
-                        allocator.free(w.interface.buffer);
-                    }
-                },
-            }
-        }
-
-        pub const ConsumeError = error{} ||
-            std.fs.File.WriteError ||
-            Writer.Error;
-
-        pub const ConsumeResponse = union(enum) {
-            eventSkipped,
-            eventConsumed,
-            eventPostponed,
-            eventForward: usize,
-            lineConsumed,
-
-            pub fn format(
-                self: *const @This(),
-                writer: *std.Io.Writer,
-            ) std.Io.Writer.Error!void {
-                switch (self.*) {
-                    .eventForward => |c| try writer.print(".{s} {d}", .{ @tagName(self.*), c }),
-                    inline else => try writer.print(".{s}", .{@tagName(self.*)}),
-                }
-            }
+    pub fn init(
+        fDetailed: *const fs.DetailedFile,
+        allocator: std.mem.Allocator,
+        argsRes: *const args.ArgsRes,
+    ) SinkWriter.InitError!@This() {
+        const eventHandler = pickEventHandler(
+            fDetailed,
+            argsRes,
+        );
+        return .{
+            .fileType = fDetailed.fileType,
+            .eventHandler = eventHandler,
+            .sinkWriter = try .init(fDetailed, allocator, eventHandler),
         };
+    }
 
-        pub fn consume(self: *@This(), event: Events) ConsumeError!ConsumeResponse {
-            if (config.mode == .release) return try self.innerConsume(event);
-
-            var colorPicker = switch (self.eventHandler) {
-                .colorMatch,
-                => |*colorPicker| colorPicker,
-                .coloredGroupOnly,
-                => |*groupOnlyHelper| &groupOnlyHelper.colorPicker,
-                .coloredMatchOnly,
-                => |*groupTracker| &groupTracker.colorPicker,
-                .groupOnly,
-                .matchOnly,
-                .pickNonMatchingLine,
-                .skipLineOnMatch,
-                => rv: {
-                    var colorPicker: ColorPicker = .init(.noColor);
-                    break :rv &colorPicker;
-                },
-            };
-
-            const state = colorPicker.state;
-            try self.writeAll(colorPicker.reset());
-
-            std.debug.print("In ┊ {f}\n", .{event});
-            const result = self.innerConsume(event) catch |e| {
-                std.debug.print("Err┊ {s}\n", .{@errorName(e)});
-                return e;
-            };
-            std.debug.print("Out┊ {f}\n", .{result});
-
-            switch (state) {
-                .color => |c| try self.writeAll(colorPicker.pickColor(c)),
-                else => {},
-            }
-
-            return result;
+    pub fn writeAll(self: *@This(), data: []const u8) Writer.Error!void {
+        switch (self.sinkWriter) {
+            .growing,
+            => |w| {
+                try w.writer().writeAll(data);
+            },
+            .buffered,
+            .directWrite,
+            => |*w| {
+                try w.interface.writeAll(data);
+            },
         }
+    }
 
-        pub fn innerConsume(self: *@This(), event: Events) ConsumeError!ConsumeResponse {
-            switch (self.eventHandler) {
-                .colorMatch => |*colorPicker| {
-                    switch (event) {
-                        .emptyMatch,
-                        => |emptyMatch| {
-                            const group = emptyMatch.group;
-                            const line = emptyMatch.line;
+    pub fn writeVecAll(self: *@This(), data: [][]const u8) Writer.Error!void {
+        switch (self.sinkWriter) {
+            .growing,
+            => |w| {
+                try w.writer().writeVecAll(data);
+            },
+            .buffered,
+            .directWrite,
+            => |*w| {
+                try w.interface.writeVecAll(data);
+            },
+        }
+    }
 
-                            if (group.n == 0 and group.start == 0) {
-                                var cChunks = ColoredChunks(1).init(colorPicker, 0);
-                                cChunks.clearChunk(line);
-                                try self.writeVecAll(&cChunks.chunks);
-                                return .lineConsumed;
-                            }
+    pub fn sinkLine(self: *@This()) Writer.Error!void {
+        // TODO: do I need a flush strategy too?
+        switch (self.fileType) {
+            .tty => {
+                switch (self.sinkWriter) {
+                    .growing => |alloc| try alloc.flush(),
+                    .buffered,
+                    => |*w| try w.interface.flush(),
+                    .directWrite,
+                    => {},
+                }
+            },
+            else => {},
+        }
+    }
 
-                            if (group.start == line.len - 1 and line[group.start] == '\n') {
-                                var cChunks = ColoredChunks(1).init(colorPicker, 0);
-                                cChunks.clearChunk("\n");
-                                try self.writeVecAll(&cChunks.chunks);
-                            }
+    pub fn sink(self: *@This()) Writer.Error!void {
+        switch (self.sinkWriter) {
+            .growing => |w| try w.flush(),
+            .buffered => |*w| try w.interface.flush(),
+            .directWrite => {},
+        }
+    }
 
-                            return .{ .eventForward = group.end + 1 };
-                        },
-                        .excludedMatch,
-                        => return .eventSkipped,
-                        .beforeMatch,
-                        => |data| {
-                            var cChunks = ColoredChunks(1).init(colorPicker, 0);
-                            cChunks.clearChunk(data);
-                            try self.writeVecAll(&cChunks.chunks);
-                            return .eventConsumed;
-                        },
-                        .match => |matchEvent| {
-                            var cChunks = ColoredChunks(1).init(
-                                colorPicker,
-                                @intCast(matchEvent.group.n),
-                            );
-                            cChunks.coloredChunk(matchEvent.group.slice(matchEvent.line));
-                            try self.writeVecAll(&cChunks.chunks);
-                            return .eventConsumed;
-                        },
-                        .noMatchEndOfLineAfterMatch,
-                        => |data| {
-                            var cChunks = ColoredChunks(1).init(colorPicker, 0);
-                            cChunks.clearChunk(data);
-                            try self.writeVecAll(&cChunks.chunks);
-                            return .eventConsumed;
-                        },
-                        .noMatchEndOfLine,
-                        .endOfMatchGroups,
-                        => return .eventSkipped,
-                        .endOfLine => {
-                            try self.sinkLine();
-                            return .eventConsumed;
-                        },
-                        .endOfFile => {
-                            try self.writeAll(colorPicker.reset());
-                            try self.sink();
-                            return .eventConsumed;
-                        },
-                    }
-                },
-                .coloredMatchOnly => |*groupTracker| {
-                    switch (event) {
-                        .emptyMatch,
-                        => |emptyEvent| return {
-                            if (emptyEvent.group.n == 0 and emptyEvent.group.start == 0 and emptyEvent.group.end == 0) return .lineConsumed;
-                            return .{ .eventForward = emptyEvent.group.end + 1 };
-                        },
-                        .excludedMatch,
-                        => |exclude| {
-                            if (exclude.group.n == 0) {
-                                groupTracker.cursor = exclude.group.start;
-                                groupTracker.group0Event = exclude;
-                                return .eventConsumed;
-                            }
-                            return .eventSkipped;
-                        },
-                        .beforeMatch,
-                        => return .eventSkipped,
-                        // When --group-highlight is used, necesarily we need more than 0
-                        // in case only 0 is available, targeGroups are reduced to .zero
-                        // in all other cases they are .zero and ensured to be .zero unless
-                        // --group-highlight is given
-                        // When --group-highlight is used and targetGroups are non-zero, group0
-                        // is guaranteed to be sent as .excludedMatch
-                        .match => |matchEvent| {
-                            switch (matchEvent.group.n) {
-                                0 => {
-                                    std.debug.assert(!matchEvent.targetGroup.anyGreaterThan(0));
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        switch (self.sinkWriter) {
+            .growing,
+            => |w| w.deinit(allocator),
+            .buffered,
+            .directWrite,
+            => |*w| {
+                if (w.interface.buffer.len > 0) {
+                    allocator.free(w.interface.buffer);
+                }
+            },
+        }
+    }
 
-                                    var cChunks = ColoredChunks(2).init(&groupTracker.colorPicker, 0);
+    pub const ConsumeError = error{} ||
+        std.fs.File.WriteError ||
+        Writer.Error;
 
-                                    cChunks.coloredChunk(matchEvent.group.slice(matchEvent.line));
-                                    cChunks.breakline();
+    pub const ConsumeResponse = union(enum) {
+        skipped,
+        consumed,
+        consumedLine,
+        cropLine,
 
-                                    try self.writeVecAll(&cChunks.chunks);
-
-                                    return .eventConsumed;
-                                },
-                                else => {
-                                    std.debug.assert(matchEvent.count > 1);
-                                    std.debug.assert(groupTracker.group0Event != null);
-
-                                    const excludedEvent = groupTracker.group0Event.?;
-                                    const group0 = excludedEvent.group;
-
-                                    const line = matchEvent.line;
-                                    const group = matchEvent.group;
-                                    const cursor = groupTracker.cursor;
-                                    const endChunk = !matchEvent.targetGroup.anyGreaterThan(group.n) or matchEvent.count - 1 == group.n;
-
-                                    var cChunks = ColoredChunks(4).init(
-                                        &groupTracker.colorPicker,
-                                        @intCast(group.n),
-                                    );
-
-                                    if (cursor < group.start) {
-                                        cChunks.clearChunk(line[cursor..group.start]);
-                                    } else cChunks.skipChunk();
-
-                                    cChunks.coloredChunk(group.slice(line));
-
-                                    // There's a fallback for this in .endOfMatchGroups
-                                    // In case last group ends at or before a previous group
-                                    if (endChunk and group.end != group0.end) {
-                                        cChunks.clearChunk(line[group.end..group0.end]);
-                                        groupTracker.cursor = group0.end;
-                                    } else {
-                                        groupTracker.cursor = group.end;
-                                        cChunks.skipChunk();
-                                    }
-
-                                    if (groupTracker.cursor == group0.end) {
-                                        cChunks.breakline();
-                                    } else cChunks.skipChunk();
-
-                                    try self.writeVecAll(&cChunks.chunks);
-
-                                    if (endChunk) {
-                                        return .{ .eventForward = group0.end };
-                                    } else return .eventConsumed;
-                                },
-                            }
-                        },
-                        .noMatchEndOfLineAfterMatch,
-                        .noMatchEndOfLine,
-                        => return .eventSkipped,
-                        .endOfMatchGroups,
-                        => {
-                            defer {
-                                groupTracker.cursor = 0;
-                                groupTracker.group0Event = null;
-                            }
-
-                            if (groupTracker.group0Event) |group0Event| {
-                                const group0 = group0Event.group;
-                                if (groupTracker.cursor != group0.end) {
-                                    const line = group0Event.line;
-
-                                    var cChunks = ColoredChunks(2).init(&groupTracker.colorPicker, 0);
-                                    cChunks.clearChunk(line[groupTracker.cursor..group0.end]);
-                                    groupTracker.cursor = group0.end;
-
-                                    cChunks.breakline();
-                                    try self.writeVecAll(&cChunks.chunks);
-
-                                    return .eventConsumed;
-                                }
-                            }
-                            return .eventConsumed;
-                        },
-                        .endOfLine => {
-                            std.debug.assert(groupTracker.group0Event == null);
-                            std.debug.assert(groupTracker.cursor == 0);
-
-                            try self.sinkLine();
-                            return .eventConsumed;
-                        },
-                        .endOfFile => {
-                            std.debug.assert(groupTracker.group0Event == null);
-                            std.debug.assert(groupTracker.cursor == 0);
-
-                            try self.writeAll(groupTracker.colorPicker.reset());
-                            try self.sink();
-                            return .eventConsumed;
-                        },
-                    }
-                },
-                .coloredGroupOnly => |*groupOnlyHelper| {
-                    switch (event) {
-                        .emptyMatch,
-                        => |emptyEvent| {
-                            if (emptyEvent.group.n == 0 and emptyEvent.group.start == 0 and emptyEvent.group.end == 0) {
-                                return .lineConsumed;
-                            }
-
-                            if (!emptyEvent.targetGroup.anyGreaterThan(emptyEvent.group.n)) {
-                                var buff: [2][]const u8 = .{
-                                    groupOnlyHelper.colorPicker.reset(),
-                                    "\n",
-                                };
-                                try self.writeVecAll(&buff);
-                            } else {
-                                var buff: [2][]const u8 = .{
-                                    groupOnlyHelper.colorPicker.reset(),
-                                    &.{groupOnlyHelper.delimiter},
-                                };
-                                try self.writeVecAll(&buff);
-                            }
-
-                            return .{ .eventForward = emptyEvent.group.end + 1 };
-                        },
-                        .excludedMatch,
-                        => |exclude| {
-                            if (exclude.group.n == 0 and exclude.group.start == 0 and exclude.group.end == 0) {
-                                return .lineConsumed;
-                            }
-                            return .eventSkipped;
-                        },
-                        .beforeMatch,
-                        => return .eventSkipped,
-                        .match => |matchEvent| {
-                            const group = matchEvent.group;
-                            const endChunk = !matchEvent.targetGroup.anyGreaterThan(group.n) or matchEvent.count - 1 == group.n;
-
-                            switch (matchEvent.group.n) {
-                                0 => std.debug.assert(!matchEvent.targetGroup.anyGreaterThan(0)),
-                                else => {},
-                            }
-                            var cChunks = ColoredChunks(2).init(
-                                &groupOnlyHelper.colorPicker,
-                                @intCast(matchEvent.group.n),
-                            );
-
-                            cChunks.coloredChunk(group.slice(matchEvent.line));
-                            if (!endChunk) {
-                                cChunks.clearChunk(&.{groupOnlyHelper.delimiter});
-                            } else cChunks.breakline();
-
-                            try self.writeVecAll(&cChunks.chunks);
-
-                            return .eventConsumed;
-                        },
-                        .noMatchEndOfLineAfterMatch,
-                        .noMatchEndOfLine,
-                        .endOfMatchGroups,
-                        => return .eventSkipped,
-                        .endOfLine => {
-                            try self.sinkLine();
-                            return .eventConsumed;
-                        },
-                        .endOfFile => {
-                            try self.writeAll(groupOnlyHelper.colorPicker.reset());
-                            try self.sink();
-                            return .eventConsumed;
-                        },
-                    }
-                },
-                .matchOnly => {
-                    switch (event) {
-                        .emptyMatch,
-                        => |emptyEvent| return {
-                            if (emptyEvent.group.n == 0 and emptyEvent.group.start == 0 and emptyEvent.group.end == 0) return .lineConsumed;
-                            return .{ .eventForward = emptyEvent.group.end + 1 };
-                        },
-                        .excludedMatch,
-                        .beforeMatch,
-                        => return .eventSkipped,
-                        .match => |matchEvent| {
-                            const slice = matchEvent.group.slice(matchEvent.line);
-
-                            if (slice.len > 0 and
-                                slice[slice.len - 1] != '\n')
-                            {
-                                var buff: [2][]const u8 = .{ slice, "\n" };
-                                try self.writeVecAll(&buff);
-                            } else try self.writeAll(slice);
-
-                            return .eventConsumed;
-                        },
-                        .noMatchEndOfLineAfterMatch,
-                        .noMatchEndOfLine,
-                        .endOfMatchGroups,
-                        => return .eventSkipped,
-                        .endOfLine,
-                        .endOfFile,
-                        => {
-                            try self.sink();
-                            return .eventConsumed;
-                        },
-                    }
-                },
-                .groupOnly => |delimiter| {
-                    switch (event) {
-                        .emptyMatch,
-                        => |emptyEvent| {
-                            if (emptyEvent.group.n == 0 and emptyEvent.group.start == 0 and emptyEvent.group.end == 0) {
-                                return .lineConsumed;
-                            }
-
-                            if (!emptyEvent.targetGroup.anyGreaterThan(emptyEvent.group.n)) {
-                                try self.writeAll("\n");
-                            } else {
-                                try self.writeAll(&.{delimiter});
-                            }
-
-                            return .{ .eventForward = emptyEvent.group.end + 1 };
-                        },
-                        .excludedMatch,
-                        .beforeMatch,
-                        => return .eventSkipped,
-                        .match => |matchEvent| {
-                            const group = matchEvent.group;
-                            const endChunk = !matchEvent.targetGroup.anyGreaterThan(group.n) or matchEvent.count - 1 == group.n;
-
-                            switch (matchEvent.group.n) {
-                                0 => std.debug.assert(!matchEvent.targetGroup.anyGreaterThan(0)),
-                                else => {},
-                            }
-
-                            const slice = matchEvent.group.slice(matchEvent.line);
-
-                            var buff: [2][]const u8 = if (endChunk) .{
-                                slice,
-                                if (slice[slice.len - 1] != '\n') "\n" else "",
-                            } else .{ slice, &.{delimiter} };
-
-                            try self.writeVecAll(&buff);
-
-                            return .eventConsumed;
-                        },
-                        .noMatchEndOfLineAfterMatch,
-                        .noMatchEndOfLine,
-                        .endOfMatchGroups,
-                        => return .eventSkipped,
-                        .endOfLine => {
-                            try self.sinkLine();
-                            return .eventConsumed;
-                        },
-                        .endOfFile => {
-                            try self.sink();
-                            return .eventConsumed;
-                        },
-                    }
-                },
-                .skipLineOnMatch => {
-                    switch (event) {
-                        .emptyMatch,
-                        => |emptyEvent| return {
-                            if (emptyEvent.group.n == 0 and emptyEvent.group.start == 0 and emptyEvent.group.end == 0) return .lineConsumed;
-                            return .{ .eventForward = emptyEvent.group.end + 1 };
-                        },
-                        .excludedMatch,
-                        .beforeMatch,
-                        => return .eventSkipped,
-                        .match => |matchEvent| {
-                            try self.writeAll(matchEvent.line);
-                            return .lineConsumed;
-                        },
-                        .noMatchEndOfLineAfterMatch,
-                        .noMatchEndOfLine,
-                        .endOfMatchGroups,
-                        => return .eventSkipped,
-                        .endOfLine => {
-                            try self.sinkLine();
-                            return .eventConsumed;
-                        },
-                        .endOfFile => {
-                            try self.sink();
-                            return .eventConsumed;
-                        },
-                    }
-                },
-                .pickNonMatchingLine => {
-                    switch (event) {
-                        .emptyMatch,
-                        => |emptyEvent| return {
-                            if (emptyEvent.group.n == 0 and emptyEvent.group.start == 0 and emptyEvent.group.end == 0) return .lineConsumed;
-                            return .{ .eventForward = emptyEvent.group.end + 1 };
-                        },
-                        .excludedMatch,
-                        .beforeMatch,
-                        .match,
-                        .noMatchEndOfLineAfterMatch,
-                        => return .eventSkipped,
-                        .noMatchEndOfLine => |line| {
-                            try self.writeAll(line);
-                            return .lineConsumed;
-                        },
-                        .endOfMatchGroups,
-                        => return .eventSkipped,
-                        .endOfLine => {
-                            try self.sinkLine();
-                            return .eventConsumed;
-                        },
-                        .endOfFile => {
-                            try self.sink();
-                            return .eventConsumed;
-                        },
-                    }
-                },
+        pub fn format(
+            self: *const @This(),
+            writer: *std.Io.Writer,
+        ) std.Io.Writer.Error!void {
+            switch (self.*) {
+                inline else => try writer.print(".{s}", .{@tagName(self.*)}),
             }
         }
     };
-}
+
+    pub fn consume(self: *@This(), comptime mode: Mode, event: Event) ConsumeError!ConsumeResponse {
+        if (comptime mode == .release) return try self.innerConsume(event);
+
+        var colorPicker = switch (self.eventHandler) {
+            .lineOnMatch,
+            .matchInLine,
+            .matchOnly,
+            => |*colorPicker| colorPicker,
+            .groupOnly,
+            => |*groupOnlyHelper| &groupOnlyHelper.colorPicker,
+            .nonMatchingLine,
+            => rv: {
+                var colorPicker: ColorPicker = .init(.noColor);
+                break :rv &colorPicker;
+            },
+        };
+
+        const state = colorPicker.state;
+        try self.writeAll(colorPicker.reset());
+
+        std.debug.print("---\n", .{});
+        std.debug.print("In ┊ {f}\n", .{event});
+        const result = self.innerConsume(event) catch |e| {
+            std.debug.print("Err┊ {s}\n", .{@errorName(e)});
+            return e;
+        };
+        std.debug.print("Out┊ {f}\n", .{result});
+
+        switch (state) {
+            .color => |c| try self.writeAll(colorPicker.pickColor(c)),
+            else => {},
+        }
+        switch (event) {
+            .eol,
+            .eof,
+            .noMatch,
+            => std.debug.print("ˉˉˉ\n", .{}),
+            else => {},
+        }
+
+        return result;
+    }
+
+    pub fn innerConsume(self: *@This(), event: Event) ConsumeError!ConsumeResponse {
+        switch (self.eventHandler) {
+            .matchInLine => |*colorPicker| return try MatchInLine.handle(
+                self,
+                colorPicker,
+                event,
+            ),
+            .matchOnly => |*colorPicker| {
+                return try MatchOnly.handle(
+                    self,
+                    colorPicker,
+                    event,
+                );
+            },
+            .groupOnly => |*groupOnlyHelper| {
+                return try GroupOnly.handle(
+                    self,
+                    groupOnlyHelper,
+                    event,
+                );
+            },
+            .lineOnMatch => |*colorPicker| return try LineOnMatch.handle(
+                self,
+                colorPicker,
+                event,
+            ),
+            .nonMatchingLine => |*colorPicker| return try NonMatchingLines.handle(
+                self,
+                colorPicker,
+                event,
+            ),
+        }
+    }
+};
+
+pub const GroupOnly = struct {
+    pub inline fn handle(sink: *Sink, groupOnlyHelper: *GroupOnlyHelper, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
+        var colorPicker = &groupOnlyHelper.colorPicker;
+        switch (event) {
+            .afterMatch,
+            .noMatch,
+            .excludedGroup,
+            .beforeGroup,
+            => return .skipped,
+            .emptyGroup,
+            => |emptyEvent| {
+                if (!emptyEvent.hasMore) return .skipped;
+
+                var chunks = colorPicker.chunks(1, emptyEvent.group.n);
+                chunks.clearChunk(&.{groupOnlyHelper.delimiter});
+
+                try sink.writeVecAll(switch (chunks) {
+                    inline else => |*c| &c.slices,
+                });
+
+                return .consumed;
+            },
+            .groupMatch => |matchEvent| {
+                var chunks = colorPicker.chunks(
+                    2,
+                    matchEvent.group.n,
+                );
+
+                chunks.coloredChunk(matchEvent.group.slice(matchEvent.line));
+                if (matchEvent.hasMore)
+                    chunks.clearChunk(&.{groupOnlyHelper.delimiter})
+                else
+                    chunks.breakline();
+
+                try sink.writeVecAll(switch (chunks) {
+                    inline else => |*c| &c.slices,
+                });
+
+                return .consumed;
+            },
+            .endOfGroups,
+            => return .skipped,
+            .eol => {
+                return try MatchOnly.endLine(sink, event);
+            },
+            .eof => {
+                return try MatchOnly.endFileColored(sink, colorPicker);
+            },
+        }
+    }
+};
+
+pub const MatchOnly = struct {
+    pub inline fn handle(sink: *Sink, colorPicker: *ColorPicker, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
+        return switch (event) {
+            .afterMatch,
+            .noMatch,
+            => return .skipped,
+            .excludedGroup,
+            => |excluded| {
+                if (excluded.group.n == 0 and excluded.hasMore) return .cropLine;
+
+                try MatchInLine.writeClear(
+                    sink,
+                    colorPicker,
+                    excluded.group.slice(excluded.line),
+                );
+                return .consumed;
+            },
+            .beforeGroup,
+            => |before| {
+                if (before.n == 0) return .skipped;
+
+                try MatchInLine.writeClear(
+                    sink,
+                    colorPicker,
+                    before.slice,
+                );
+                return .consumed;
+            },
+            .endOfGroups,
+            => {
+                return try endOfGroupBreakline(sink, colorPicker, event);
+            },
+            .emptyGroup,
+            => .skipped,
+            .groupMatch,
+            => |match| {
+                try MatchInLine.writeColored(
+                    sink,
+                    colorPicker,
+                    match.group.slice(match.line),
+                    match.group.n,
+                );
+                return .consumed;
+            },
+            .eol,
+            => {
+                return try endLine(sink, event);
+            },
+            .eof,
+            => {
+                return try endFileColored(sink, colorPicker);
+            },
+        };
+    }
+
+    pub inline fn endOfGroupBreakline(sink: *Sink, colorPicker: *ColorPicker, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
+        assert(event == .endOfGroups);
+        const endOfGroups = event.endOfGroups;
+
+        if (endOfGroups.group0Empty) return .skipped;
+        if (endOfGroups.hadBreakline) return .skipped;
+
+        if (endOfGroups.sliceOpt) |slice| {
+            var chunks = colorPicker.chunks(2, 0);
+            chunks.clearChunk(slice);
+            if (slice[slice.len - 1] == '\n')
+                chunks.skipChunk()
+            else
+                chunks.breakline();
+            try sink.writeVecAll(switch (chunks) {
+                inline else => |*c| &c.slices,
+            });
+            return .consumed;
+        }
+
+        try MatchInLine.breakline(
+            sink,
+            colorPicker,
+        );
+        return .consumed;
+    }
+
+    pub inline fn endLine(sink: *Sink, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
+        assert(event == .eol);
+        const eolEvent = event.eol;
+
+        if (eolEvent.hadMatches) {
+            try sink.sinkLine();
+            return .consumed;
+        } else return .skipped;
+    }
+
+    pub inline fn endFileColored(sink: *Sink, colorPicker: *ColorPicker) Sink.ConsumeError!Sink.ConsumeResponse {
+        try sink.writeAll(colorPicker.reset());
+        try sink.sink();
+        return .consumed;
+    }
+};
+
+pub const NonMatchingLines = struct {
+    pub inline fn handle(sink: *Sink, colorPicker: *ColorPicker, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
+        switch (event) {
+            .emptyGroup,
+            .excludedGroup,
+            .beforeGroup,
+            .groupMatch,
+            .afterMatch,
+            .endOfGroups,
+            => return .consumedLine,
+            .noMatch => |line| return LineOnMatch.consumeLine(
+                sink,
+                colorPicker,
+                line,
+            ),
+            .eol => return try NonMatchingLines.endOfLine(
+                sink,
+                colorPicker,
+                event,
+            ),
+            .eof => return try MatchInLine.endOfFile(
+                sink,
+                colorPicker,
+                event,
+            ),
+        }
+    }
+
+    pub inline fn endOfLine(sink: *Sink, colorPicker: *ColorPicker, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
+        assert(event == .eol);
+        const eolEvent = event.eol;
+
+        if (!eolEvent.hadMatches) {
+            // Line has no breakline
+            if (eolEvent.charOpt) |char| {
+                assert(char == '\n');
+                try MatchInLine.breakline(sink, colorPicker);
+            }
+            try sink.sinkLine();
+            return .consumed;
+        } else return .skipped;
+    }
+};
+
+pub const LineOnMatch = struct {
+    pub inline fn handle(sink: *Sink, colorPicker: *ColorPicker, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
+        switch (event) {
+            .emptyGroup,
+            .groupMatch,
+            => |emptyMatch| return try LineOnMatch.consumeLine(
+                sink,
+                colorPicker,
+                emptyMatch.line,
+            ),
+            // All groups regardless of exclusion should cause line to be consumed
+            .excludedGroup,
+            => |matchEvent| return try LineOnMatch.consumeLine(
+                sink,
+                colorPicker,
+                matchEvent.line,
+            ),
+            .beforeGroup,
+            .afterMatch,
+            .noMatch,
+            .endOfGroups,
+            => return .skipped,
+            .eol => return try MatchInLine.endOfLine(
+                sink,
+                colorPicker,
+                event,
+            ),
+            .eof => return try MatchInLine.endOfFile(
+                sink,
+                colorPicker,
+                event,
+            ),
+        }
+    }
+
+    pub inline fn consumeLine(sink: *Sink, colorPicker: *ColorPicker, slice: []const u8) Sink.ConsumeError!Sink.ConsumeResponse {
+        try MatchInLine.writeClear(sink, colorPicker, slice);
+        return .consumedLine;
+    }
+};
+
+pub const MatchInLine = struct {
+    pub inline fn handle(
+        sink: *Sink,
+        colorPicker: *ColorPicker,
+        event: Event,
+    ) Sink.ConsumeError!Sink.ConsumeResponse {
+        switch (event) {
+            .emptyGroup,
+            => return try MatchInLine.emptyMatch(
+                sink,
+                colorPicker,
+                event,
+            ),
+            .beforeGroup,
+            => return try MatchInLine.beforeGroup(
+                sink,
+                colorPicker,
+                event,
+            ),
+            .groupMatch => return try MatchInLine.groupMatch(
+                sink,
+                colorPicker,
+                event,
+            ),
+            .afterMatch,
+            => return try MatchInLine.afterMatch(
+                sink,
+                colorPicker,
+                event,
+            ),
+            .excludedGroup,
+            .noMatch,
+            .endOfGroups,
+            => return .skipped,
+            .eol => return try MatchInLine.endOfLine(
+                sink,
+                colorPicker,
+                event,
+            ),
+            .eof => return try MatchInLine.endOfFile(
+                sink,
+                colorPicker,
+                event,
+            ),
+        }
+    }
+
+    pub inline fn groupMatch(sink: *Sink, colorPicker: *ColorPicker, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
+        assert(event == .groupMatch);
+        const matchEvent = event.groupMatch;
+
+        try writeColored(
+            sink,
+            colorPicker,
+            matchEvent.group.slice(matchEvent.line),
+            matchEvent.group.n,
+        );
+        return .consumed;
+    }
+
+    pub inline fn beforeGroup(sink: *Sink, colorPicker: *ColorPicker, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
+        assert(event == .beforeGroup);
+        const slice = event.beforeGroup.slice;
+
+        try writeClear(sink, colorPicker, slice);
+        return .consumed;
+    }
+
+    pub inline fn endOfFile(sink: *Sink, colorPicker: *ColorPicker, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
+        assert(event == .eof);
+
+        try sink.writeAll(colorPicker.reset());
+        try sink.sink();
+        return .consumed;
+    }
+
+    pub inline fn endOfLine(sink: *Sink, colorPicker: *ColorPicker, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
+        assert(event == .eol);
+        const eolEvent = event.eol;
+
+        if (eolEvent.hadMatches) {
+            // Line has no breakline
+            if (eolEvent.charOpt) |char| {
+                assert(char == '\n');
+                try breakline(sink, colorPicker);
+            }
+            try sink.sinkLine();
+            return .consumed;
+        } else return .skipped;
+    }
+
+    pub inline fn afterMatch(sink: *Sink, colorPicker: *ColorPicker, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
+        assert(event == .afterMatch);
+        const slice = event.afterMatch;
+
+        try writeClear(sink, colorPicker, slice);
+        return .consumed;
+    }
+
+    // This consumed char at cursor, later
+    // groupCursor is bumped to +1
+    pub inline fn emptyMatch(sink: *Sink, colorPicker: *ColorPicker, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
+        assert(event == .emptyGroup);
+        const empty = event.emptyGroup;
+
+        const group = empty.group;
+        assert(group.start == group.end);
+        const line = empty.line;
+
+        try writeClear(sink, colorPicker, &.{line[group.start]});
+        return .consumed;
+    }
+
+    pub inline fn writeColored(sink: *Sink, colorPicker: *ColorPicker, slice: []const u8, offset: u16) Sink.ConsumeError!void {
+        var chunks = colorPicker.chunks(1, offset);
+        chunks.coloredChunk(slice);
+        try sink.writeVecAll(switch (chunks) {
+            inline else => |*c| &c.slices,
+        });
+    }
+
+    pub inline fn breakline(sink: *Sink, colorPicker: *ColorPicker) Sink.ConsumeError!void {
+        var chunks = colorPicker.chunks(1, 0);
+        chunks.breakline();
+        try sink.writeVecAll(switch (chunks) {
+            inline else => |*c| &c.slices,
+        });
+    }
+
+    pub inline fn writeClear(sink: *Sink, colorPicker: *ColorPicker, slice: []const u8) Sink.ConsumeError!void {
+        var chunks = colorPicker.chunks(1, 0);
+        chunks.clearChunk(slice);
+        try sink.writeVecAll(switch (chunks) {
+            inline else => |*c| &c.slices,
+        });
+    }
+};

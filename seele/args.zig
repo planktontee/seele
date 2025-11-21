@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = std.debug.assert;
 const zcasp = @import("zcasp");
 const regent = @import("regent");
 const spec = zcasp.spec;
@@ -328,28 +329,25 @@ pub const Args = struct {
         InvalidGroupsForOptions,
     };
 
-    pub fn targetGroup(self: *const @This(), fSink: anytype, maxGroups: usize) TargetGroupError!TargetGroup {
-        switch (fSink.eventHandler) {
-            // Deciding whether or not to use colors is on the event handler
-            .colorMatch,
-            .coloredMatchOnly,
+    pub fn targetGroup(self: *const @This(), eventHandlerT: sink.EventHanderT, maxGroups: u16) TargetGroupError!TargetGroup {
+        switch (eventHandlerT) {
+            .matchInLine,
+            .matchOnly,
             => {
                 if (maxGroups > 1 and self.@"group-highlight" and self.groups == .zero) {
-                    return .{ .range = .{ .start = 1, .end = maxGroups } };
+                    return .{ .range = .{ .start = 1, .end = maxGroups - 1 } };
                 }
                 return self.groups;
             },
-            .coloredGroupOnly,
             .groupOnly,
             => {
                 if (maxGroups > 1 and self.groups == .zero) {
-                    return .{ .range = .{ .start = 1, .end = maxGroups } };
+                    return .{ .range = .{ .start = 1, .end = maxGroups - 1 } };
                 }
                 return self.groups;
             },
-            .matchOnly,
-            .skipLineOnMatch,
-            .pickNonMatchingLine,
+            .lineOnMatch,
+            .nonMatchingLine,
             => return .zero,
         }
         unreachable;
@@ -357,14 +355,14 @@ pub const Args = struct {
 };
 
 pub const RangeGroup = struct {
-    start: usize = 1,
-    end: usize = std.math.maxInt(usize),
+    start: u16 = 1,
+    end: usize = std.math.maxInt(u16),
 
-    pub fn includes(self: *const @This(), group: usize) bool {
+    pub fn includes(self: *const @This(), group: u16) bool {
         return group >= self.start and group <= self.end;
     }
 
-    pub fn anyGreaterThan(self: *const @This(), group: usize) bool {
+    pub fn anyGreaterThan(self: *const @This(), group: u16) bool {
         return self.end > group;
     }
 };
@@ -372,12 +370,12 @@ pub const RangeGroup = struct {
 pub const PerItemGroup = struct {
     arr: []const u16,
 
-    pub fn includes(self: *const @This(), group: usize) bool {
+    pub fn includes(self: *const @This(), group: u16) bool {
         for (self.arr) |item| if (item == group) return true;
         return false;
     }
 
-    pub fn anyGreaterThan(self: *const @This(), group: usize) bool {
+    pub fn anyGreaterThan(self: *const @This(), group: u16) bool {
         if (self.arr.len > 0 and self.arr[self.arr.len - 1] > group) return true;
         return false;
     }
@@ -387,12 +385,12 @@ pub const ChainedGroup = struct {
     ranges: []const RangeGroup = &.{},
     perItem: PerItemGroup = .{ .arr = &.{} },
 
-    pub fn includes(self: *const @This(), group: usize) bool {
+    pub fn includes(self: *const @This(), group: u16) bool {
         for (self.ranges) |range| if (range.includes(group)) return true;
         return self.perItem.includes(group);
     }
 
-    pub fn anyGreaterThan(self: *const @This(), group: usize) bool {
+    pub fn anyGreaterThan(self: *const @This(), group: u16) bool {
         if (self.ranges.len > 0 and
             self.ranges[self.ranges.len - 1].anyGreaterThan(group))
         {
@@ -403,11 +401,11 @@ pub const ChainedGroup = struct {
 };
 
 pub const ZeroGroup = struct {
-    pub fn includes(_: *const @This(), group: usize) bool {
+    pub fn includes(_: *const @This(), group: u16) bool {
         return group == 0;
     }
 
-    pub fn anyGreaterThan(_: *const @This(), _: usize) bool {
+    pub fn anyGreaterThan(_: *const @This(), _: u16) bool {
         return false;
     }
 };
@@ -418,13 +416,15 @@ pub const TargetGroup = union(enum) {
     perItem: PerItemGroup,
     chained: ChainedGroup,
 
-    pub fn includes(self: *const @This(), group: usize) bool {
+    pub fn includes(self: *const @This(), group: u16) bool {
         return switch (self.*) {
             inline else => |tg| tg.includes(group),
         };
     }
 
-    pub fn anyGreaterThan(self: *const @This(), group: usize) bool {
+    pub fn anyGreaterThan(self: *const @This(), group: u16, max: u16) bool {
+        assert(group <= max);
+        if (group == max) return false;
         return switch (self.*) {
             inline else => |tg| tg.anyGreaterThan(group),
         };
