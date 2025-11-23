@@ -8,157 +8,150 @@ const args = @import("seele/args.zig");
 const regex = @import("seele/regex.zig");
 const sink = @import("seele/sink.zig");
 const fs = @import("seele/fs.zig");
+const FileCursor = fs.FileCursor;
 const source = @import("seele/source.zig");
 const mem = @import("seele/mem.zig");
-const limits = @import("seele/limits.zig");
-
-pub const std_options: std.Options = .{
-    .logFn = log,
-};
-
-pub fn log(
-    comptime _: std.log.Level,
-    comptime _: @TypeOf(.enum_literal),
-    comptime format: []const u8,
-    logArgs: anytype,
-) void {
-    var buffer: [64]u8 = undefined;
-    const stderr = std.debug.lockStderrWriter(&buffer);
-    defer std.debug.unlockStderrWriter();
-    nosuspend stderr.print(format ++ "\n", logArgs) catch return;
-}
+const Context = @import("seele/context.zig");
+const DebugAlloc = std.heap.DebugAllocator(.{
+    .safety = true,
+});
 
 pub fn main() !u8 {
-    // var sfba = std.heap.stackFallback(4098, std.heap.page_allocator);
-    // const allocator = sfba.get();
-    // NOTE: this is completely arbitrary and currently set to no fallback for
-    // testing purposes
-    var buff: [1024]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&buff);
-    const allocator = fba.allocator();
+    var ctx: Context = undefined;
+    Context.instance = &ctx;
 
-    var result: args.ArgsRes = .init(allocator);
-    defer result.deinit();
+    const rlimit = try std.posix.getrlimit(.STACK);
+    const currMb = rlimit.cur / units.ByteUnit.mb;
+    const TargetMaxT = u6;
 
-    if (result.parseArgs()) |err| {
+    if (currMb <= std.math.maxInt(TargetMaxT) and currMb > 5) {
+        switch (@as(u6, @intCast(currMb))) {
+            0...5 => unreachable,
+            inline else => |targetMb| {
+                const target: usize = @intCast(targetMb - 3);
+                const size = target / 2 * units.ByteUnit.mb;
+
+                return try stackBufferTrampoline(size);
+            },
+        }
+    } else {
+        defer Context.instance.deinit();
+
+        // No stack-backed allocators in this case
+        const heapAlloc = rv: {
+            if (builtin.mode == .Debug) {
+                var debugAlloc = DebugAlloc.init;
+                break :rv debugAlloc.allocator();
+            } else {
+                break :rv std.heap.page_allocator;
+            }
+        };
+
+        // After this we are left with 512kb stack mem in this scrap
+        // it's still backed by page
+        const stderrWBuff = try heapAlloc.alloc(
+            u8,
+            512 * units.ByteUnit.kb,
+        );
+
+        var stderrW = std.fs.File.stderr().writerStreaming(stderrWBuff);
+        Context.instance.init(
+            heapAlloc,
+            heapAlloc,
+            heapAlloc,
+            &stderrW,
+        );
+
+        return try handleArgsAndRun();
+    }
+}
+
+pub fn stackBufferTrampoline(comptime size: usize) !u8 {
+    defer Context.instance.deinit();
+
+    const scrapAlloc = rv: {
+        if (builtin.mode == .Debug) {
+            var debugAlloc = DebugAlloc.init;
+            break :rv debugAlloc.allocator();
+        } else {
+            var sfba = mem.stackFallback(
+                units.ByteUnit.mb,
+                std.heap.page_allocator,
+            );
+            break :rv sfba.get();
+        }
+    };
+    const inAlloc = rv: {
+        if (builtin.mode == .Debug) {
+            var debugAlloc = DebugAlloc.init;
+            break :rv debugAlloc.allocator();
+        } else {
+            var sfba = mem.stackFallback(
+                size,
+                std.heap.page_allocator,
+            );
+            break :rv sfba.get();
+        }
+    };
+    const outAlloc = rv: {
+        if (builtin.mode == .Debug) {
+            var debugAlloc = DebugAlloc.init;
+            break :rv debugAlloc.allocator();
+        } else {
+            var sfba = mem.stackFallback(
+                size,
+                std.heap.page_allocator,
+            );
+            break :rv sfba.get();
+        }
+    };
+
+    // After this we are left with 512kb stack mem in this scrap
+    // it's still backed by page
+    const stderrWBuff = try scrapAlloc.alloc(
+        u8,
+        512 * units.ByteUnit.kb,
+    );
+
+    var stderrW = std.fs.File.stderr().writerStreaming(stderrWBuff);
+    Context.instance.init(
+        scrapAlloc,
+        inAlloc,
+        outAlloc,
+        &stderrW,
+    );
+
+    return try handleArgsAndRun();
+}
+
+pub fn handleArgsAndRun() !u8 {
+    var argsRes: args.ArgsRes = .init(Context.instance.scrapAlloc);
+    defer if (builtin.mode == .Debug) argsRes.deinit();
+
+    if (argsRes.parseArgs()) |err| {
         if (err.message) |message| {
-            std.log.err("Last opt <{?s}>, Last token <{?s}>. ", .{
+            try Context.instance.stderrW.print("Last opt <{?s}>, Last token <{?s}>. ", .{
                 err.lastOpt,
                 err.lastToken,
             });
-            std.log.err("{s}", .{message});
+            try Context.instance.stderrW.writeAll(message);
             return 1;
         }
     }
 
-    if (result.verb == null) result.verb = .{ .match = .initEmpty(allocator) };
+    if (argsRes.verb == null) argsRes.verb = .{
+        // NOTE: this is cleared in the argsRes.deinit
+        .match = .initEmpty(Context.instance.scrapAlloc),
+    };
 
-    inline for (&.{ true, false }) |v| {
-        if (v == result.options.trace and v)
-            return try pickStackAndRun(&result, .trace)
-        else
-            return try pickStackAndRun(&result, .release);
+    switch (@intFromBool(argsRes.options.trace)) {
+        0 => try run(.release, &argsRes),
+        1 => try run(.trace, &argsRes),
     }
-
-    unreachable;
-}
-
-pub inline fn pickStackAndRun(argsRes: *const args.ArgsRes, comptime mode: sink.Mode) !u8 {
-    const rlimit = try std.posix.getrlimit(.STACK);
-    inline for (@typeInfo(@TypeOf(limits.StackSizes)).@"struct".fields) |field| {
-        const fValue = field.defaultValue().?;
-        if (rlimit.cur == fValue) {
-            const fValueMb = fValue / units.ByteUnit.mb;
-            const splitSize = ((fValueMb - (fValueMb / 8) * 2) / 2) * units.ByteUnit.mb;
-
-            run(splitSize, argsRes, mode) catch |e| switch (e) {
-                regex.CompileError.BadRegex => return 1,
-                else => return e,
-            };
-            break;
-        }
-    } else {
-        run(units.ByteUnit.mb * 3, argsRes, mode) catch |e| switch (e) {
-            regex.CompileError.BadRegex => return 1,
-            else => return e,
-        };
-    }
-
     return 0;
 }
 
-pub const FileArgType = union(enum) {
-    stdin,
-    file: []const u8,
-
-    pub fn name(self: *const @This()) []const u8 {
-        return switch (self.*) {
-            .stdin => "stdin",
-            .file => |fileArg| fileArg,
-        };
-    }
-};
-
-pub const FileCursor = struct {
-    files: [1]FileArgType = undefined,
-    current: ?std.fs.File = null,
-    idx: usize = 0,
-
-    pub fn init(argsRes: *const args.ArgsRes) @This() {
-        var self: @This() = .{};
-
-        if (argsRes.positionals.reminder) |reminder| {
-            const target = reminder[0];
-            if (target.len == 1 and target[0] == '-') {
-                self.files[0] = .stdin;
-            } else {
-                self.files[0] = .{ .file = reminder[0] };
-            }
-        } else {
-            self.files[0] = .stdin;
-        }
-
-        return self;
-    }
-
-    pub fn currentType(self: *const @This()) FileArgType {
-        return self.files[self.idx];
-    }
-
-    pub fn next(self: *@This()) OpenError!?std.fs.File {
-        std.debug.assert(self.current == null);
-        if (self.idx >= self.files.len) return null;
-        const fType = self.files[self.idx];
-
-        self.current = switch (fType) {
-            .file => |fileArg| try open(fileArg),
-            .stdin => std.fs.File.stdin(),
-        };
-
-        return self.current;
-    }
-
-    pub const OpenError = std.fs.File.OpenError || std.posix.RealPathError;
-
-    // TODO: handle other fd-types by actually querying them
-    pub fn open(fileArg: []const u8) OpenError!std.fs.File {
-        const filePath = if (std.fs.path.isAbsolute(fileArg))
-            fileArg
-        else rv: {
-            var buff: [4098]u8 = undefined;
-            break :rv try std.fs.cwd().realpath(fileArg, &buff);
-        };
-        return try std.fs.openFileAbsolute(filePath, .{ .mode = .read_only });
-    }
-
-    pub fn close(self: *@This()) void {
-        std.debug.assert(self.current != null);
-        self.current.?.close();
-        self.current = null;
-        self.idx += 1;
-    }
-};
-
+// TODO: review this
 pub const RunError = error{} ||
     args.Args.TargetGroupError ||
     regex.CompileError ||
@@ -172,57 +165,22 @@ pub const RunError = error{} ||
     std.Io.Reader.DelimiterError ||
     std.Io.Writer.Error;
 
-pub fn run(comptime stackPartitionSize: usize, argsRes: *const args.ArgsRes, comptime mode: sink.Mode) RunError!void {
-    // NOTE: because Fba only resizes the last piece allocated, we need to split
-    // the stack mem into 2 different allocators to ensure they can grow
-    // Zig issues a prlimit64 for 16mb, I'm taking 12mb here for IO, probably not a good idea and wont work on OSs that return error on that call
-    // For debug builds, bigger stacks were seemingly being consumed elsewhere, so I reduced
-    // it to 4mb, completely arbitrarily, I will leave this here for now but I'm moving to a debug
-    // allocator for Debug build instead
-
-    const DebugAlloc = std.heap.DebugAllocator(.{
-        .safety = true,
-    });
-
-    // TODO: move this to top-level
-    const inputAlloc = rv: {
-        if (builtin.mode == .Debug) {
-            var dba = DebugAlloc.init;
-            break :rv dba.allocator();
-        } else {
-            var inputSfb = mem.stackFallback(stackPartitionSize, std.heap.page_allocator);
-            break :rv inputSfb.get();
-        }
-    };
-    const outputAlloc = rv: {
-        if (builtin.mode == .Debug) {
-            var dba = DebugAlloc.init;
-            break :rv dba.allocator();
-        } else {
-            var outputSfb = mem.stackFallback(stackPartitionSize, std.heap.page_allocator);
-            break :rv outputSfb.get();
-        }
-    };
-    defer {
-        if (builtin.mode == .Debug) {
-            const inDba: *DebugAlloc = @ptrCast(@alignCast(inputAlloc.ptr));
-            const outDba: *DebugAlloc = @ptrCast(@alignCast(outputAlloc.ptr));
-            if (inDba.deinit() == .leak) @panic("Input memory leaked!");
-            if (outDba.deinit() == .leak) @panic("Output memory leaked!");
-        }
-    }
-
+pub fn run(comptime mode: sink.Mode, argsRes: *const args.ArgsRes) RunError!void {
     const matchPattern = argsRes.positionals.tuple.@"0";
-    const result = try regex.compile(inputAlloc, matchPattern);
+    const result = try regex.compile(
+        Context.instance.scrapAlloc,
+        matchPattern,
+        argsRes.options.compileOptions(),
+    );
 
     var rgx = switch (result) {
         .Ok => |rgx| rgx,
         .Err => |rgxErr| {
-            std.log.err(
+            try Context.instance.stderrW.print(
                 "{s} [{d}]: {s}",
                 .{ @errorName(rgxErr.err), rgxErr.code, rgxErr.message },
             );
-            rgxErr.deinit(inputAlloc);
+            if (builtin.mode == .Debug) rgxErr.deinit(Context.instance.scrapAlloc);
 
             try rgxErr.throw();
             unreachable;
@@ -237,16 +195,19 @@ pub fn run(comptime stackPartitionSize: usize, argsRes: *const args.ArgsRes, com
     defer fileCursor.close();
 
     const input = try fs.DetailedFile.from(inputFile);
-    var fSource = try source.Source.init(&input, inputAlloc);
-    defer fSource.deinit(inputAlloc);
+    var fSource = try source.Source.init(
+        &input,
+        Context.instance.inAlloc,
+    );
+    defer fSource.deinit(Context.instance.inAlloc);
 
     const stdout = try fs.DetailedFile.from(std.fs.File.stdout());
     var fSink = try sink.Sink.init(
         &stdout,
-        outputAlloc,
+        Context.instance.outAlloc,
         argsRes,
     );
-    defer fSink.deinit(outputAlloc);
+    defer fSink.deinit(Context.instance.outAlloc);
 
     // TODO: add multiline
     if (!argsRes.options.@"line-by-line") return;
@@ -259,6 +220,8 @@ pub fn run(comptime stackPartitionSize: usize, argsRes: *const args.ArgsRes, com
     // \K handling needs partial and other types of handling for anchoring
 
     // TODO: move cursors to event
+
+    var lineN: usize = 0;
     fileLoop: while (true) {
         const readEvent = try fSource.nextLine();
         switch (readEvent) {
@@ -269,9 +232,16 @@ pub fn run(comptime stackPartitionSize: usize, argsRes: *const args.ArgsRes, com
             .eofChunk,
             .line,
             => |line| {
+                lineN += 1;
                 var lineCursor = LineMatchCursor.init(line);
 
                 lineLoop: while (lineCursor.hasReminder()) {
+                    // NOTE:
+                    // This idea was taken from grep, needs testing but it does improve
+                    // performance
+                    lineCursor.skipBadUTF8();
+
+                    // TODO: handle bad utf8 as cropping
                     var groupCursor = try lineCursor.matchNext(
                         rgx,
                         fSink.eventHandler,
@@ -279,11 +249,17 @@ pub fn run(comptime stackPartitionSize: usize, argsRes: *const args.ArgsRes, com
                     ) orelse {
                         if (lineCursor.hadMatches)
                             _ = try fSink.consume(mode, .{
-                                .afterMatch = lineCursor.reminder(),
+                                .afterMatch = .{
+                                    .line = lineCursor.reminder(),
+                                    .lineN = lineN,
+                                },
                             })
                         else
                             _ = try fSink.consume(mode, .{
-                                .noMatch = lineCursor.reminder(),
+                                .noMatch = .{
+                                    .line = lineCursor.reminder(),
+                                    .lineN = lineN,
+                                },
                             });
                         lineCursor.finish();
                         continue :lineLoop;
@@ -309,6 +285,7 @@ pub fn run(comptime stackPartitionSize: usize, argsRes: *const args.ArgsRes, com
                             const res = try fSink.consume(mode, .{
                                 .beforeGroup = .{
                                     .slice = slice,
+                                    .lineN = lineN,
                                     .n = group.n,
                                 },
                             });
@@ -326,6 +303,7 @@ pub fn run(comptime stackPartitionSize: usize, argsRes: *const args.ArgsRes, com
                                 .excludedGroup = .{
                                     .group = group,
                                     .line = line,
+                                    .lineN = lineN,
                                     .hasMore = groupCursor.hasMoreIncluded(),
                                 },
                             });
@@ -359,6 +337,7 @@ pub fn run(comptime stackPartitionSize: usize, argsRes: *const args.ArgsRes, com
                             try fSink.consume(mode, .{
                                 .emptyGroup = .{
                                     .line = line,
+                                    .lineN = lineN,
                                     .group = group,
                                     .hasMore = groupCursor.hasMoreIncluded(),
                                 },
@@ -367,6 +346,7 @@ pub fn run(comptime stackPartitionSize: usize, argsRes: *const args.ArgsRes, com
                             try fSink.consume(mode, .{
                                 .groupMatch = .{
                                     .line = line,
+                                    .lineN = lineN,
                                     .group = group,
                                     .hasMore = groupCursor.hasMoreIncluded(),
                                 },
@@ -397,7 +377,7 @@ pub fn run(comptime stackPartitionSize: usize, argsRes: *const args.ArgsRes, com
                     _ = try fSink.consume(mode, .{
                         .endOfGroups = .{
                             .sliceOpt = reminderOpt,
-                            // we are either always +1
+                            // we are always +1
                             .hadBreakline = groupCursor.relativeToken(-1) == '\n',
                             .group0Empty = groupCursor.isGroup0Empty(),
                         },
@@ -428,7 +408,6 @@ pub fn run(comptime stackPartitionSize: usize, argsRes: *const args.ArgsRes, com
     }
 }
 
-// TODO: use pointers
 pub const GroupMatchCursor = struct {
     current: u16,
     count: u16,
@@ -625,6 +604,34 @@ pub const LineMatchCursor = struct {
 
     pub fn finish(self: *@This()) void {
         self.forwardTo(self.line.len);
+    }
+
+    pub fn skipBadUTF8(self: *@This()) void {
+        var offset: usize = self.lineToken;
+        while (offset < self.line.len) {
+            const codePointLen: u3 = switch (self.line[offset]) {
+                0b0000_0000...0b0111_1111 => break,
+                0b1100_0000...0b1101_1111 => 2,
+                0b1110_0000...0b1110_1111 => 3,
+                0b1111_0000...0b1111_0111 => 4,
+                else => {
+                    offset += 1;
+                    continue;
+                },
+            };
+            switch (codePointLen) {
+                1 => unreachable,
+                inline else => |end| {
+                    if (std.unicode.utf8ValidateSlice(self.line[offset .. offset + end]))
+                        break
+                    else {
+                        offset += end;
+                        continue;
+                    }
+                },
+            }
+        }
+        self.forwardTo(offset);
     }
 
     pub fn forwardTo(self: *@This(), i: usize) void {

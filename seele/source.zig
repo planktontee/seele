@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const units = @import("regent").units;
 const fs = @import("fs.zig");
 const c = @import("c.zig").c;
@@ -25,7 +26,7 @@ pub fn pickSourceBuffer(fDetailed: *const fs.DetailedFile) SourceBuffer {
         .characterDevice,
         => return .{
             .growing = .{
-                .initialSize = units.CacheSize.L2,
+                .initialSize = units.ByteUnit.mb,
                 .growthFactor = 3,
             },
         },
@@ -67,6 +68,7 @@ pub const MmapLineReader = struct {
     }
 
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (builtin.mode != .Debug) return;
         std.posix.munmap(self.buffer);
         allocator.destroy(self);
     }
@@ -74,18 +76,25 @@ pub const MmapLineReader = struct {
     pub const MmapBufferError = std.posix.MMapError || std.posix.MadviseError;
 
     pub fn mmapBuffer(fDetailed: *const fs.DetailedFile) MmapBufferError![]align(std.heap.page_size_min) u8 {
-        return try std.posix.mmap(
+        const ptr = try std.posix.mmap(
             null,
             @intCast(fDetailed.stat.size),
             std.posix.PROT.READ,
             .{
-                .TYPE = .SHARED,
+                .TYPE = .PRIVATE,
                 .NONBLOCK = true,
                 .POPULATE = true,
             },
             fDetailed.file.handle,
             0,
         );
+        _ = std.os.linux.fadvise(
+            fDetailed.file.handle,
+            0,
+            @bitCast(fDetailed.stat.size),
+            c.POSIX_FADV_SEQUENTIAL,
+        );
+        return ptr;
     }
 };
 
@@ -124,6 +133,7 @@ pub const GrowingLineReader = struct {
     }
 
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (builtin.mode != .Debug) return;
         self.allocator.free(self.fsReader.interface.buffer);
         allocator.destroy(self);
     }

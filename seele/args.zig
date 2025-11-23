@@ -14,6 +14,7 @@ const SpecResponseWithConfig = spec.SpecResponseWithConfig;
 const positionals = zcasp.positionals;
 const fs = @import("fs.zig");
 const sink = @import("sink.zig");
+const regex = @import("regex.zig");
 
 const DefaultCodec = zcasp.codec.ArgCodec(Args);
 const CursorT = regent.collections.Cursor([]const u8);
@@ -160,6 +161,10 @@ pub const Args = struct {
     groups: TargetGroup = .zero,
     @"group-delimiter": u8 = '\n',
 
+    @"ignore-case": bool = false,
+    @"word-match": bool = false,
+    @"line-number": bool = false,
+
     multiline: bool = false,
     recursive: bool = false,
     @"follow-links": bool = false,
@@ -186,6 +191,10 @@ pub const Args = struct {
 
         .gN = .groups,
         .gD = .@"group-delimiter",
+
+        .i = .@"ignore-case",
+        .w = .@"word-match",
+        .n = .@"line-number",
 
         .mL = .multiline,
         .R = .recursive,
@@ -224,6 +233,10 @@ pub const Args = struct {
 
             .{ .field = .groups, .description = "Pick group numbers to be colored, or if -O is used, to be displayed" },
             .{ .field = .@"group-delimiter", .description = "Change group delimiter for --group-only" },
+
+            .{ .field = .@"ignore-case", .description = "Ignore case regex flag" },
+            .{ .field = .@"word-match", .description = "Match strings that have word boundary at start and end" },
+            .{ .field = .@"line-number", .description = "Shows line number" },
 
             .{ .field = .multiline, .description = "Multiline matching" },
             .{ .field = .recursive, .description = "Recursively matches all files in paths" },
@@ -351,6 +364,17 @@ pub const Args = struct {
             => return .zero,
         }
         unreachable;
+    }
+
+    pub fn compileOptions(self: *const @This()) regex.CompileOptions {
+        return .{
+            .flags = .{
+                .caseless = self.@"ignore-case",
+            },
+            .extraFlags = .{
+                .matchWord = self.@"word-match",
+            },
+        };
     }
 };
 

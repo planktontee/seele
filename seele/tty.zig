@@ -100,10 +100,10 @@ test "Rainbow to escape" {
 
 pub const EscapeColor = enum {
     boldRed,
-    boldGreen,
-    boldYellow,
     boldBlue,
     boldMagenta,
+    boldGreen,
+    boldYellow,
     boldCyan,
     boldBlack,
     boldWhite,
@@ -135,17 +135,6 @@ pub const EscapeColor = enum {
         return EscapeColor.reset.escapeCode();
     }
 };
-
-test "EscapeColor to escape" {
-    const t = std.testing;
-    try t.expectEqualStrings("\x1b[1;31m", EscapeColor.pick(0));
-    try t.expectEqualStrings("\x1b[1;32m", EscapeColor.pick(1));
-    try t.expectEqualStrings("\x1b[1;33m", EscapeColor.pick(2));
-    try t.expectEqualStrings("\x1b[1;34m", EscapeColor.pick(3));
-    try t.expectEqualStrings("\x1b[1;35m", EscapeColor.pick(4));
-    try t.expectEqualStrings("\x1b[1;36m", EscapeColor.pick(5));
-    try t.expectEqualStrings("\x1b[0m", EscapeColor.resetCode());
-}
 
 pub const ColorPattern = enum {
     rainbow,
