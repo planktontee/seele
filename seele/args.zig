@@ -386,8 +386,11 @@ pub const RangeGroup = struct {
         return group >= self.start and group <= self.end;
     }
 
-    pub fn anyGreaterThan(self: *const @This(), group: u16) bool {
-        return self.end > group;
+    pub fn anyGreaterThan(self: *const @This(), group: u16, max: u16) bool {
+        if (self.start <= max)
+            return @min(self.end, max) > group
+        else
+            return false;
     }
 };
 
@@ -399,9 +402,18 @@ pub const PerItemGroup = struct {
         return false;
     }
 
-    pub fn anyGreaterThan(self: *const @This(), group: u16) bool {
-        if (self.arr.len > 0 and self.arr[self.arr.len - 1] > group) return true;
-        return false;
+    pub fn anyGreaterThan(self: *const @This(), group: u16, max: u16) bool {
+        if (self.arr.len == 0) return false;
+
+        var i = self.arr.len;
+        const end: u16 = rv: while (i > 0) {
+            i -= 1;
+            const value = self.arr[i];
+            if (value <= max)
+                break :rv value;
+        } else return false;
+
+        return end > group;
     }
 };
 
@@ -414,13 +426,15 @@ pub const ChainedGroup = struct {
         return self.perItem.includes(group);
     }
 
-    pub fn anyGreaterThan(self: *const @This(), group: u16) bool {
-        if (self.ranges.len > 0 and
-            self.ranges[self.ranges.len - 1].anyGreaterThan(group))
-        {
-            return true;
+    pub fn anyGreaterThan(self: *const @This(), group: u16, max: u16) bool {
+        var i = self.ranges.len;
+        while (i > 0) {
+            i -= 1;
+            if (self.ranges[i].anyGreaterThan(group, max))
+                return true;
         }
-        return self.perItem.anyGreaterThan(group);
+
+        return self.perItem.anyGreaterThan(group, max);
     }
 };
 
@@ -429,7 +443,7 @@ pub const ZeroGroup = struct {
         return group == 0;
     }
 
-    pub fn anyGreaterThan(_: *const @This(), _: u16) bool {
+    pub fn anyGreaterThan(_: *const @This(), _: u16, _: u16) bool {
         return false;
     }
 };
@@ -448,9 +462,8 @@ pub const TargetGroup = union(enum) {
 
     pub fn anyGreaterThan(self: *const @This(), group: u16, max: u16) bool {
         assert(group <= max);
-        if (group == max) return false;
         return switch (self.*) {
-            inline else => |tg| tg.anyGreaterThan(group),
+            inline else => |tg| tg.anyGreaterThan(group, max),
         };
     }
 };
