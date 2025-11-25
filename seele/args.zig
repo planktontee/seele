@@ -231,8 +231,8 @@ pub const Args = struct {
             .{ .field = .@"match-only", .description = "Display only matched text" },
             .{ .field = .@"group-only", .description = "Display only groups matched, split by delimiter, see --group-delimiter." },
 
-            .{ .field = .groups, .description = "Pick group numbers to be colored, or if -O is used, to be displayed. Examples: '0'; '1..10'; '1,3..5,7'" },
-            .{ .field = .@"group-delimiter", .typeHint = false, .defaultHint = false, .description = "Change group delimiter for --group-only" },
+            .{ .field = .groups, .typeHint = false, .defaultHint = false, .description = "Pick group numbers to be colored, or if -O is used, to be displayed. Examples: '0'; '1..10'; '1,3..5,7'" },
+            .{ .field = .@"group-delimiter", .description = "Change group delimiter for --group-only" },
 
             .{ .field = .@"ignore-case", .description = "Ignore case regex flag" },
             .{ .field = .@"word-match", .description = "Match strings that have word boundary at start and end" },
