@@ -290,6 +290,9 @@ pub fn run(comptime mode: sink.Mode, argsRes: *const args.ArgsRes) RunError!void
                                 },
                             });
                             switch (res) {
+                                .consumed => {
+                                    groupCursor.moveTo(group.start);
+                                },
                                 .consumedLine => {
                                     lineCursor.finish();
                                     continue :lineLoop;
@@ -483,7 +486,7 @@ pub const GroupMatchCursor = struct {
     }
 
     pub fn cropLine(self: *@This(), to: usize) void {
-        assert(to < self.line.len);
+        assert(to <= self.line.len);
         assert(self.lineToken <= to);
         self.line = self.line[0..to];
     }

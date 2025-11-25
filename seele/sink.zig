@@ -554,8 +554,6 @@ pub const Mode = enum {
     release,
 };
 
-// TODO: make interface call better
-// should it be an actual vtable?
 pub const Sink = struct {
     fileType: fs.FileType,
     eventHandler: EventHandler,
@@ -704,6 +702,7 @@ pub const Sink = struct {
 pub const GroupOnly = struct {
     colorPicker: ColorPicker,
     delimiter: u8,
+    writeLine: bool = true,
     showLines: bool,
     lastLine: usize = 0,
 
@@ -712,6 +711,14 @@ pub const GroupOnly = struct {
             .delimiter = delimiter,
             .showLines = showLines,
             .colorPicker = .init(pattern),
+        };
+    }
+
+    pub inline fn showLineDelimiter(self: *const @This()) []const u8 {
+        // NOTE:
+        // this is a comptime char -> str generator
+        return switch (self.delimiter) {
+            inline else => |c| &.{c},
         };
     }
 
@@ -727,16 +734,19 @@ pub const GroupOnly = struct {
             => |emptyEvent| {
                 if (!emptyEvent.hasMore) return .skipped;
 
+                if (self.writeLine)
+                    try MatchOnly.showLine(self, sink, colorPicker, emptyEvent.lineN);
+
                 var chunks = colorPicker.chunks(1, emptyEvent.group.n);
                 chunks.clearChunk(&.{self.delimiter});
-
-                try sink.writeVecAll(switch (chunks) {
-                    inline else => |*c| &c.slices,
-                });
+                try sink.writeVecAll(chunks.slices());
 
                 return .consumed;
             },
             .groupMatch => |matchEvent| {
+                if (self.writeLine)
+                    try MatchOnly.showLine(self, sink, colorPicker, matchEvent.lineN);
+
                 var chunks = colorPicker.chunks(
                     2,
                     matchEvent.group.n,
@@ -748,14 +758,15 @@ pub const GroupOnly = struct {
                 else
                     chunks.breakline();
 
-                try sink.writeVecAll(switch (chunks) {
-                    inline else => |*c| &c.slices,
-                });
+                try sink.writeVecAll(chunks.slices());
 
                 return .consumed;
             },
             .endOfGroups,
-            => return .skipped,
+            => {
+                self.writeLine = true;
+                return .skipped;
+            },
             .eol,
             => return try MatchOnly.endLine(sink, event),
             .eof,
@@ -767,6 +778,7 @@ pub const GroupOnly = struct {
 pub const MatchOnly = struct {
     colorPicker: ColorPicker,
     showLines: bool,
+    writeLine: bool = true,
     lastLine: usize = 0,
 
     pub fn init(showLines: bool, pattern: tty.ColorPattern) @This() {
@@ -774,6 +786,10 @@ pub const MatchOnly = struct {
             .showLines = showLines,
             .colorPicker = .init(pattern),
         };
+    }
+
+    pub inline fn showLineDelimiter(_: *const @This()) []const u8 {
+        return SHOW_LINE_DELIMITER;
     }
 
     pub inline fn handle(self: *@This(), sink: *Sink, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
@@ -798,6 +814,9 @@ pub const MatchOnly = struct {
             => |before| {
                 if (before.n == 0) return .skipped;
 
+                if (self.writeLine)
+                    try self.showLine(sink, colorPicker, before.lineN);
+
                 try MatchInLine.writeClear(
                     sink,
                     colorPicker,
@@ -806,15 +825,21 @@ pub const MatchOnly = struct {
                 return .consumed;
             },
             .endOfGroups,
-            => return try endOfGroupBreakline(
-                sink,
-                colorPicker,
-                event,
-            ),
+            => {
+                self.writeLine = true;
+                return try endOfGroupBreakline(
+                    sink,
+                    colorPicker,
+                    event,
+                );
+            },
             .emptyGroup,
             => .skipped,
             .groupMatch,
             => |match| {
+                if (self.writeLine or match.group.n == 0)
+                    try self.showLine(sink, colorPicker, match.lineN);
+
                 try MatchInLine.writeColored(
                     sink,
                     colorPicker,
@@ -828,6 +853,17 @@ pub const MatchOnly = struct {
             .eof,
             => return try MatchInLine.endOfFile(sink, colorPicker, event),
         };
+    }
+
+    pub inline fn showLine(self: anytype, sink: *Sink, colorPicker: *ColorPicker, lineN: usize) Sink.ConsumeError!void {
+        self.lastLine = 0;
+        try MatchInLine.showLine(
+            self,
+            sink,
+            colorPicker,
+            lineN,
+        );
+        self.writeLine = false;
     }
 
     pub inline fn endOfGroupBreakline(sink: *Sink, colorPicker: *ColorPicker, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
@@ -844,9 +880,7 @@ pub const MatchOnly = struct {
                 chunks.skipChunk()
             else
                 chunks.breakline();
-            try sink.writeVecAll(switch (chunks) {
-                inline else => |*c| &c.slices,
-            });
+            try sink.writeVecAll(chunks.slices());
             return .consumed;
         }
 
@@ -880,6 +914,10 @@ pub const NonMatchingLine = struct {
         };
     }
 
+    pub inline fn showLineDelimiter(_: *const @This()) []const u8 {
+        return SHOW_LINE_DELIMITER;
+    }
+
     pub inline fn handle(self: *@This(), sink: *Sink, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
         var colorPicker = &self.colorPicker;
         _ = &colorPicker;
@@ -892,9 +930,11 @@ pub const NonMatchingLine = struct {
             .endOfGroups,
             => return .consumedLine,
             .noMatch => |lineEvent| return LineOnMatch.consumeLine(
+                self,
                 sink,
                 colorPicker,
                 lineEvent.line,
+                lineEvent.lineN,
             ),
             .eol => return try NonMatchingLine.endOfLine(
                 sink,
@@ -937,23 +977,29 @@ pub const LineOnMatch = struct {
         };
     }
 
+    pub inline fn showLineDelimiter(_: *const @This()) []const u8 {
+        return SHOW_LINE_DELIMITER;
+    }
+
     pub inline fn handle(self: *@This(), sink: *Sink, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
         var colorPicker = &self.colorPicker;
         _ = &colorPicker;
         switch (event) {
             .emptyGroup,
             .groupMatch,
-            => |emptyMatch| return try LineOnMatch.consumeLine(
+            => |emptyMatch| return try self.consumeLine(
                 sink,
                 colorPicker,
                 emptyMatch.line,
+                emptyMatch.lineN,
             ),
             // All groups regardless of exclusion should cause line to be consumed
             .excludedGroup,
-            => |matchEvent| return try LineOnMatch.consumeLine(
+            => |matchEvent| return try self.consumeLine(
                 sink,
                 colorPicker,
                 matchEvent.line,
+                matchEvent.lineN,
             ),
             .beforeGroup,
             .afterMatch,
@@ -973,7 +1019,14 @@ pub const LineOnMatch = struct {
         }
     }
 
-    pub inline fn consumeLine(sink: *Sink, colorPicker: *ColorPicker, slice: []const u8) Sink.ConsumeError!Sink.ConsumeResponse {
+    pub inline fn consumeLine(
+        self: anytype,
+        sink: *Sink,
+        colorPicker: *ColorPicker,
+        slice: []const u8,
+        lineN: usize,
+    ) Sink.ConsumeError!Sink.ConsumeResponse {
+        try MatchInLine.showLine(self, sink, colorPicker, lineN);
         try MatchInLine.writeClear(sink, colorPicker, slice);
         return .consumedLine;
     }
@@ -991,6 +1044,10 @@ pub const MatchInLine = struct {
         };
     }
 
+    pub inline fn showLineDelimiter(_: *const @This()) []const u8 {
+        return SHOW_LINE_DELIMITER;
+    }
+
     pub inline fn handle(self: *@This(), sink: *Sink, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
         var colorPicker = &self.colorPicker;
         _ = &colorPicker;
@@ -1004,13 +1061,13 @@ pub const MatchInLine = struct {
                 );
             },
             .beforeGroup,
-            => return try MatchInLine.beforeGroup(
+            => return try self.beforeGroup(
                 sink,
                 colorPicker,
                 event,
             ),
             .groupMatch,
-            => return try MatchInLine.groupMatch(
+            => return try self.groupMatch(
                 sink,
                 colorPicker,
                 event,
@@ -1040,10 +1097,11 @@ pub const MatchInLine = struct {
         }
     }
 
-    pub inline fn groupMatch(sink: *Sink, colorPicker: *ColorPicker, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
+    pub inline fn groupMatch(self: anytype, sink: *Sink, colorPicker: *ColorPicker, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
         assert(event == .groupMatch);
         const matchEvent = event.groupMatch;
 
+        try self.showLine(sink, colorPicker, matchEvent.lineN);
         try writeColored(
             sink,
             colorPicker,
@@ -1053,12 +1111,31 @@ pub const MatchInLine = struct {
         return .consumed;
     }
 
-    pub inline fn beforeGroup(sink: *Sink, colorPicker: *ColorPicker, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
+    pub inline fn beforeGroup(self: anytype, sink: *Sink, colorPicker: *ColorPicker, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
         assert(event == .beforeGroup);
-        const slice = event.beforeGroup.slice;
+        const beforeGroupEvent = event.beforeGroup;
+        const slice = beforeGroupEvent.slice;
 
+        try self.showLine(sink, colorPicker, beforeGroupEvent.lineN);
         try writeClear(sink, colorPicker, slice);
+
         return .consumed;
+    }
+
+    pub inline fn showLine(self: anytype, sink: *Sink, colorPicker: *ColorPicker, lineN: usize) Sink.ConsumeError!void {
+        // NOTE: this is fine because we move away from direct io in case showLines is used
+        if (self.showLines and self.lastLine != lineN) {
+            var chunks = colorPicker.chunks(2, 0);
+            const buffLen = comptime std.fmt.count("{d}", .{std.math.maxInt(usize)});
+            var buff: [buffLen]u8 = undefined;
+            const lineNStr = try std.fmt.bufPrint(&buff, "{d}", .{lineN});
+            chunks.forceColoredChunk(tty.EscapeColor.green.escapeCode(), lineNStr);
+            chunks.forceColoredChunk(tty.EscapeColor.reset.escapeCode(), self.showLineDelimiter());
+            _ = colorPicker.reset();
+
+            try sink.writeVecAll(chunks.slices());
+            self.lastLine = lineN;
+        }
     }
 
     pub inline fn endOfFile(sink: *Sink, colorPicker: *ColorPicker, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
@@ -1110,24 +1187,20 @@ pub const MatchInLine = struct {
     pub inline fn writeColored(sink: *Sink, colorPicker: *ColorPicker, slice: []const u8, offset: u16) Sink.ConsumeError!void {
         var chunks = colorPicker.chunks(1, offset);
         chunks.coloredChunk(slice);
-        try sink.writeVecAll(switch (chunks) {
-            inline else => |*c| &c.slices,
-        });
+        try sink.writeVecAll(chunks.slices());
     }
 
     pub inline fn breakline(sink: *Sink, colorPicker: *ColorPicker) Sink.ConsumeError!void {
         var chunks = colorPicker.chunks(1, 0);
         chunks.breakline();
-        try sink.writeVecAll(switch (chunks) {
-            inline else => |*c| &c.slices,
-        });
+        try sink.writeVecAll(chunks.slices());
     }
 
     pub inline fn writeClear(sink: *Sink, colorPicker: *ColorPicker, slice: []const u8) Sink.ConsumeError!void {
         var chunks = colorPicker.chunks(1, 0);
         chunks.clearChunk(slice);
-        try sink.writeVecAll(switch (chunks) {
-            inline else => |*c| &c.slices,
-        });
+        try sink.writeVecAll(chunks.slices());
     }
 };
+
+const SHOW_LINE_DELIMITER = ":";

@@ -107,6 +107,7 @@ pub const EscapeColor = enum {
     boldCyan,
     boldBlack,
     boldWhite,
+    green,
     reset,
 
     pub fn escapeCode(self: @This()) []const u8 {
@@ -119,6 +120,7 @@ pub const EscapeColor = enum {
             .boldCyan => "\x1b[1;36m",
             .boldBlack => "\x1b[1;30m",
             .boldWhite => "\x1b[1;37m",
+            .green => "\x1b[0;32m",
             .reset => "\x1b[0m",
         };
     }
