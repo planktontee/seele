@@ -31,7 +31,7 @@ pub fn main() !u8 {
                 const target: usize = @intCast(targetMb - 3);
                 const size = target / 2 * units.ByteUnit.mb;
 
-                return try stackBufferTrampoline(size);
+                return @intFromEnum(try stackBufferTrampoline(size));
             },
         }
     } else {
@@ -62,11 +62,11 @@ pub fn main() !u8 {
             &stderrW,
         );
 
-        return try handleArgsAndRun();
+        return @intFromEnum(try handleArgsAndRun());
     }
 }
 
-pub fn stackBufferTrampoline(comptime size: usize) !u8 {
+pub fn stackBufferTrampoline(comptime size: usize) !RunReturn {
     defer Context.instance.deinit();
 
     const scrapAlloc = rv: {
@@ -124,7 +124,7 @@ pub fn stackBufferTrampoline(comptime size: usize) !u8 {
     return try handleArgsAndRun();
 }
 
-pub fn handleArgsAndRun() !u8 {
+pub fn handleArgsAndRun() !RunReturn {
     var argsRes: args.ArgsRes = .init(Context.instance.scrapAlloc);
     defer if (builtin.mode == .Debug) argsRes.deinit();
 
@@ -135,7 +135,7 @@ pub fn handleArgsAndRun() !u8 {
                 err.lastToken,
             });
             try Context.instance.stderrW.writeAll(message);
-            return 1;
+            return .badArgs;
         }
     }
 
@@ -144,15 +144,17 @@ pub fn handleArgsAndRun() !u8 {
         .match = .initEmpty(Context.instance.scrapAlloc),
     };
 
-    switch (@intFromBool(argsRes.options.trace)) {
+    return switch (@intFromBool(argsRes.options.trace)) {
         0 => try run(.release, &argsRes),
         1 => try run(.trace, &argsRes),
-    }
-    return 0;
+    };
 }
 
 // TODO: review this
-pub const RunError = error{} ||
+pub const RunError = error{
+    BadInputFile,
+    UnsupportedMatchMode,
+} ||
     args.Args.TargetGroupError ||
     regex.CompileError ||
     regex.Regex.MatchError ||
@@ -165,7 +167,18 @@ pub const RunError = error{} ||
     std.Io.Reader.DelimiterError ||
     std.Io.Writer.Error;
 
-pub fn run(comptime mode: sink.Mode, argsRes: *const args.ArgsRes) RunError!void {
+const MatchStats = struct {
+    matchCount: usize = 0,
+    lineN: usize = 0,
+};
+
+const RunReturn = enum(u2) {
+    ok = 0,
+    matchNotFound = 1,
+    badArgs = 2,
+};
+
+pub fn run(comptime mode: sink.Mode, argsRes: *const args.ArgsRes) RunError!RunReturn {
     const matchPattern = argsRes.positionals.tuple.@"0";
     const result = try regex.compile(
         Context.instance.scrapAlloc,
@@ -191,7 +204,7 @@ pub fn run(comptime mode: sink.Mode, argsRes: *const args.ArgsRes) RunError!void
 
     var fileCursor = FileCursor.init(argsRes);
     // TODO: iterate over folders and more files
-    const inputFile = try fileCursor.next() orelse return;
+    const inputFile = try fileCursor.next() orelse return RunError.BadInputFile;
     defer fileCursor.close();
 
     const input = try fs.DetailedFile.from(inputFile);
@@ -210,7 +223,7 @@ pub fn run(comptime mode: sink.Mode, argsRes: *const args.ArgsRes) RunError!void
     defer fSink.deinit(Context.instance.outAlloc);
 
     // TODO: add multiline
-    if (!argsRes.options.@"line-by-line") return;
+    if (!argsRes.options.@"line-by-line") return RunError.UnsupportedMatchMode;
 
     // TODO:
     // checks for ovect[0] > ovect[1]
@@ -220,8 +233,7 @@ pub fn run(comptime mode: sink.Mode, argsRes: *const args.ArgsRes) RunError!void
     // \K handling needs partial and other types of handling for anchoring
 
     // TODO: move cursors to event
-
-    var lineN: usize = 0;
+    var stats: MatchStats = .{};
     fileLoop: while (true) {
         const readEvent = try fSource.nextLine();
         switch (readEvent) {
@@ -232,7 +244,7 @@ pub fn run(comptime mode: sink.Mode, argsRes: *const args.ArgsRes) RunError!void
             .eofChunk,
             .line,
             => |line| {
-                lineN += 1;
+                stats.lineN += 1;
                 var lineCursor = LineMatchCursor.init(line);
 
                 lineLoop: while (lineCursor.hasReminder()) {
@@ -251,19 +263,20 @@ pub fn run(comptime mode: sink.Mode, argsRes: *const args.ArgsRes) RunError!void
                             _ = try fSink.consume(mode, .{
                                 .afterMatch = .{
                                     .line = lineCursor.reminder(),
-                                    .lineN = lineN,
+                                    .lineN = stats.lineN,
                                 },
                             })
                         else
                             _ = try fSink.consume(mode, .{
                                 .noMatch = .{
                                     .line = lineCursor.reminder(),
-                                    .lineN = lineN,
+                                    .lineN = stats.lineN,
                                 },
                             });
                         lineCursor.finish();
                         continue :lineLoop;
                     };
+                    stats.matchCount += 1;
 
                     groupLoop: while (groupCursor.hasNextGroup()) {
                         const group = groupCursor.peekGroup() catch |e| switch (e) {
@@ -285,7 +298,7 @@ pub fn run(comptime mode: sink.Mode, argsRes: *const args.ArgsRes) RunError!void
                             const res = try fSink.consume(mode, .{
                                 .beforeGroup = .{
                                     .slice = slice,
-                                    .lineN = lineN,
+                                    .lineN = stats.lineN,
                                     .n = group.n,
                                 },
                             });
@@ -306,7 +319,7 @@ pub fn run(comptime mode: sink.Mode, argsRes: *const args.ArgsRes) RunError!void
                                 .excludedGroup = .{
                                     .group = group,
                                     .line = line,
-                                    .lineN = lineN,
+                                    .lineN = stats.lineN,
                                     .hasMore = groupCursor.hasMoreIncluded(),
                                 },
                             });
@@ -340,7 +353,7 @@ pub fn run(comptime mode: sink.Mode, argsRes: *const args.ArgsRes) RunError!void
                             try fSink.consume(mode, .{
                                 .emptyGroup = .{
                                     .line = line,
-                                    .lineN = lineN,
+                                    .lineN = stats.lineN,
                                     .group = group,
                                     .hasMore = groupCursor.hasMoreIncluded(),
                                 },
@@ -349,7 +362,7 @@ pub fn run(comptime mode: sink.Mode, argsRes: *const args.ArgsRes) RunError!void
                             try fSink.consume(mode, .{
                                 .groupMatch = .{
                                     .line = line,
-                                    .lineN = lineN,
+                                    .lineN = stats.lineN,
                                     .group = group,
                                     .hasMore = groupCursor.hasMoreIncluded(),
                                 },
@@ -409,6 +422,9 @@ pub fn run(comptime mode: sink.Mode, argsRes: *const args.ArgsRes) RunError!void
             },
         }
     }
+
+    if (stats.matchCount == 0) return .matchNotFound;
+    return .ok;
 }
 
 pub const GroupMatchCursor = struct {
