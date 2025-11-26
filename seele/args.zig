@@ -164,6 +164,7 @@ pub const Args = struct {
     @"ignore-case": bool = false,
     @"word-match": bool = false,
     @"line-number": bool = false,
+    @"match-max": usize = std.math.maxInt(usize),
 
     multiline: bool = false,
     recursive: bool = false,
@@ -195,6 +196,7 @@ pub const Args = struct {
         .i = .@"ignore-case",
         .w = .@"word-match",
         .n = .@"line-number",
+        .m = .@"match-max",
 
         .mL = .multiline,
         .R = .recursive,
@@ -237,6 +239,7 @@ pub const Args = struct {
             .{ .field = .@"ignore-case", .description = "Ignore case regex flag" },
             .{ .field = .@"word-match", .description = "Match strings that have word boundary at start and end" },
             .{ .field = .@"line-number", .description = "Shows line number" },
+            .{ .field = .@"match-max", .defaultHint = false, .description = "Match at most n number of matches." },
 
             .{ .field = .multiline, .description = "Multiline matching" },
             .{ .field = .recursive, .description = "Recursively matches all files in paths" },

@@ -168,8 +168,21 @@ pub const RunError = error{
     std.Io.Writer.Error;
 
 const MatchStats = struct {
-    matchCount: usize = 0,
-    lineN: usize = 0,
+    matchCount: usize,
+    lineN: usize,
+    max: usize,
+
+    pub fn init(max: usize) @This() {
+        return .{
+            .matchCount = 0,
+            .lineN = 0,
+            .max = max,
+        };
+    }
+
+    pub fn isDone(self: @This()) bool {
+        return self.max == self.matchCount;
+    }
 };
 
 const RunReturn = enum(u2) {
@@ -205,7 +218,7 @@ pub fn run(comptime mode: sink.Mode, argsRes: *const args.ArgsRes) RunError!RunR
     var fileCursor = FileCursor.init(argsRes);
     // TODO: iterate over folders and more files
     const inputFile = try fileCursor.next() orelse return RunError.BadInputFile;
-    defer fileCursor.close();
+    defer fileCursor.closeCurrent();
 
     const input = try fs.DetailedFile.from(inputFile);
     var fSource = try source.Source.init(
@@ -233,10 +246,10 @@ pub fn run(comptime mode: sink.Mode, argsRes: *const args.ArgsRes) RunError!RunR
     // \K handling needs partial and other types of handling for anchoring
 
     // TODO: move cursors to event
-    var stats: MatchStats = .{};
+    var stats: MatchStats = .init(argsRes.options.@"match-max");
     fileLoop: while (true) {
         const readEvent = try fSource.nextLine();
-        switch (readEvent) {
+        fileState: switch (readEvent) {
             .eof => {
                 _ = try fSink.consume(mode, .eof);
                 break :fileLoop;
@@ -248,6 +261,8 @@ pub fn run(comptime mode: sink.Mode, argsRes: *const args.ArgsRes) RunError!RunR
                 var lineCursor = LineMatchCursor.init(line);
 
                 lineLoop: while (lineCursor.hasReminder()) {
+                    if (stats.isDone()) continue :fileState .eof;
+
                     // NOTE:
                     // This idea was taken from grep, needs testing but it does improve
                     // performance

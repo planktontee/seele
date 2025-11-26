@@ -1,4 +1,6 @@
 const std = @import("std");
+const assert = std.debug.assert;
+const Allocator = std.mem.Allocator;
 const args = @import("args.zig");
 const units = @import("zcasp").units;
 const File = std.fs.File;
@@ -67,74 +69,55 @@ pub const DetailedFile = struct {
     }
 };
 
-pub const FileArgType = union(enum) {
-    stdin,
-    file: []const u8,
-
-    pub fn name(self: *const @This()) []const u8 {
-        return switch (self.*) {
-            .stdin => "stdin",
-            .file => |fileArg| fileArg,
-        };
-    }
-};
-
 pub const FileCursor = struct {
-    files: [1]FileArgType = undefined,
+    fileArgsOpt: ?[]const []const u8,
+    firstFile: bool = true,
     current: ?std.fs.File = null,
     idx: usize = 0,
 
     pub fn init(argsRes: *const args.ArgsRes) @This() {
-        var self: @This() = .{};
+        return .{
+            .fileArgsOpt = argsRes.positionals.reminder,
+        };
+    }
 
-        if (argsRes.positionals.reminder) |reminder| {
-            const target = reminder[0];
-            if (target.len == 1 and target[0] == '-') {
-                self.files[0] = .stdin;
-            } else {
-                self.files[0] = .{ .file = reminder[0] };
-            }
-        } else {
-            self.files[0] = .stdin;
+    pub const OpenError = std.fs.File.OpenError || std.posix.RealPathError;
+    pub fn next(self: *@This()) OpenError!?std.fs.File {
+        assert(self.current == null);
+        if (self.firstFile and self.fileArgsOpt == null) {
+            self.current = std.fs.File.stdin();
+            return self.current;
         }
 
-        return self;
-    }
-
-    pub fn currentType(self: *const @This()) FileArgType {
-        return self.files[self.idx];
-    }
-
-    pub fn next(self: *@This()) OpenError!?std.fs.File {
-        std.debug.assert(self.current == null);
-        if (self.idx >= self.files.len) return null;
-        const fType = self.files[self.idx];
-
-        self.current = switch (fType) {
-            .file => |fileArg| try open(fileArg),
-            .stdin => std.fs.File.stdin(),
-        };
+        if (self.fileArgsOpt) |fileArgs| {
+            const target = fileArgs[self.idx];
+            if (target.len == 1 and target[0] == '-') {
+                self.current = std.fs.File.stdin();
+            } else {
+                // TODO: handle folders
+                const filePath = if (std.fs.path.isAbsolute(target))
+                    target
+                else rv: {
+                    var buff: [4098]u8 = undefined;
+                    break :rv try std.fs.cwd().realpath(target, &buff);
+                };
+                self.current = try std.fs.openFileAbsolute(
+                    filePath,
+                    .{ .mode = .read_only },
+                );
+            }
+        }
 
         return self.current;
     }
 
-    pub const OpenError = std.fs.File.OpenError || std.posix.RealPathError;
-
-    // TODO: handle other fd-types by actually querying them
-    pub fn open(fileArg: []const u8) OpenError!std.fs.File {
-        const filePath = if (std.fs.path.isAbsolute(fileArg))
-            fileArg
-        else rv: {
-            var buff: [4098]u8 = undefined;
-            break :rv try std.fs.cwd().realpath(fileArg, &buff);
-        };
-        return try std.fs.openFileAbsolute(filePath, .{ .mode = .read_only });
-    }
-
-    pub fn close(self: *@This()) void {
-        std.debug.assert(self.current != null);
+    pub fn closeCurrent(self: *@This()) void {
+        assert(self.current != null);
         self.current.?.close();
         self.current = null;
-        self.idx += 1;
+        if (self.firstFile)
+            self.firstFile = false
+        else
+            self.idx += 1;
     }
 };
