@@ -190,8 +190,8 @@ pub const Args = struct {
         .o = .@"match-only",
         .O = .@"group-only",
 
-        .gN = .groups,
-        .gD = .@"group-delimiter",
+        .g = .groups,
+        .d = .@"group-delimiter",
 
         .i = .@"ignore-case",
         .w = .@"word-match",
@@ -202,7 +202,7 @@ pub const Args = struct {
         .R = .recursive,
         .fL = .@"follow-links",
 
-        .gH = .@"group-highlight",
+        .h = .@"group-highlight",
 
         .bR = .byteRanges,
     };

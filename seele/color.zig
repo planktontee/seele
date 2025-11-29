@@ -218,7 +218,7 @@ pub fn Chunks(comptime size: usize) type {
 
         // NOTE:
         // this does not alter the colorPicker state
-        pub inline fn forceColoredChunk(self: *@This(), color: []const u8, chunk: []const u8) void {
+        pub inline fn forceChunk(self: *@This(), color: []const u8, chunk: []const u8) void {
             switch (self.*) {
                 inline else => |*chunks| chunks.forceColoredChunk(color, chunk),
             }

@@ -15,25 +15,32 @@ pub const SourceBufferType = enum {
 pub const SourceBuffer = union(SourceBufferType) {
     growing: GrowingLineReader.Config,
     mmap,
+
+    pub fn fromType(buffType: SourceBufferType) @This() {
+        return switch (buffType) {
+            .growing,
+            => .{
+                .growing = .{
+                    .initialSize = units.ByteUnit.mb,
+                    .growthFactor = 3,
+                },
+            },
+            .mmap => .mmap,
+        };
+    }
 };
 
-pub fn pickSourceBuffer(fDetailed: *const fs.DetailedFile) SourceBuffer {
+pub fn pickSourceBuffer(fDetailed: *const fs.DetailedFile, isRecursive: bool) SourceBufferType {
     // NOTE: capped sources wont read more than cap even with iovecs
-    switch (fDetailed.fileType) {
-        .generic,
+    return switch (fDetailed.fileType) {
         .tty,
+        // TODO: probe pibes / request more size
         .pipe,
         .characterDevice,
-        => return .{
-            .growing = .{
-                .initialSize = units.ByteUnit.mb,
-                .growthFactor = 3,
-            },
-        },
+        => .growing,
         .file,
-        => return .mmap,
-    }
-    unreachable;
+        => if (isRecursive) .growing else .mmap,
+    };
 }
 
 pub const ReadEvent = union(enum) {
@@ -48,7 +55,7 @@ pub const ReadEvent = union(enum) {
 };
 
 pub const MmapLineReader = struct {
-    buffer: []align(std.heap.page_size_min) const u8,
+    buffer: []align(std.heap.page_size_min) u8,
     reader: Reader,
 
     pub fn nextLine(self: *@This()) ReadEvent.Error!ReadEvent {
@@ -71,6 +78,16 @@ pub const MmapLineReader = struct {
         if (builtin.mode != .Debug) return;
         std.posix.munmap(self.buffer);
         allocator.destroy(self);
+    }
+
+    // NOTE:
+    // mmap cannot be re-sourced because it's tied to a file and would need to be moved
+    // this isnt such a great idea but I havent seen a significant
+    // performance degradation from this
+    pub fn loadSource(self: *@This(), fDetailed: *const fs.DetailedFile) MmapBufferError!void {
+        std.posix.munmap(self.buffer);
+        self.buffer = try mmapBuffer(fDetailed);
+        self.reader = .fixed(self.buffer);
     }
 
     pub const MmapBufferError = std.posix.MMapError || std.posix.MadviseError;
@@ -132,6 +149,15 @@ pub const GrowingLineReader = struct {
         return .{ .line = line };
     }
 
+    pub fn loadSource(self: *@This(), fDetailed: *const fs.DetailedFile) !void {
+        const buff = self.fsReader.interface.buffer;
+        const fsReader = switch (fDetailed.accessType) {
+            .streaming => fDetailed.file.readerStreaming(buff),
+            .positional => fDetailed.file.reader(buff),
+        };
+        self.fsReader = fsReader;
+    }
+
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         if (builtin.mode != .Debug) return;
         self.allocator.free(self.fsReader.interface.buffer);
@@ -147,10 +173,20 @@ pub const SourceReader = union(SourceBufferType) {
         MmapLineReader.MmapBufferError ||
         fs.DetectTypeError;
 
-    pub fn init(fDetailed: *const fs.DetailedFile, allocator: std.mem.Allocator) InitError!@This() {
-        const sourceBuffer = pickSourceBuffer(fDetailed);
+    pub fn init(
+        fDetailed: *const fs.DetailedFile,
+        allocator: std.mem.Allocator,
+        isRecursive: bool,
+    ) InitError!@This() {
+        return try .initWithBufferType(
+            pickSourceBuffer(fDetailed, isRecursive),
+            fDetailed,
+            allocator,
+        );
+    }
 
-        return switch (sourceBuffer) {
+    pub fn initWithBufferType(bufferType: SourceBufferType, fDetailed: *const fs.DetailedFile, allocator: std.mem.Allocator) InitError!@This() {
+        return switch (SourceBuffer.fromType(bufferType)) {
             .growing => |config| rv: {
                 const inPlace = try allocator.create(GrowingLineReader);
                 errdefer allocator.destroy(inPlace);
@@ -186,11 +222,25 @@ pub const SourceReader = union(SourceBufferType) {
 
 pub const Source = struct {
     sourceReader: SourceReader,
+    fDetailed: *const fs.DetailedFile,
 
-    pub fn init(fDetailed: *const fs.DetailedFile, allocator: std.mem.Allocator) SourceReader.InitError!@This() {
+    pub fn init(
+        fDetailed: *const fs.DetailedFile,
+        allocator: std.mem.Allocator,
+        isRecursive: bool,
+    ) SourceReader.InitError!@This() {
         return .{
-            .sourceReader = try .init(fDetailed, allocator),
+            .sourceReader = try .init(fDetailed, allocator, isRecursive),
+            .fDetailed = fDetailed,
         };
+    }
+
+    pub fn loadSource(self: *@This(), fDetailed: *const fs.DetailedFile) SourceReader.InitError!void {
+        switch (self.sourceReader) {
+            inline else => |source| {
+                return try source.loadSource(fDetailed);
+            },
+        }
     }
 
     pub fn nextLine(self: *@This()) ReadEvent.Error!ReadEvent {

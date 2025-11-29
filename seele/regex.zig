@@ -62,7 +62,7 @@ pub fn compile(
         &errOff,
         compContext,
     ) orelse {
-        const buff = try allocator.alloc(u8, 4098);
+        const buff = try allocator.alloc(u8, 4096);
         const end = pcre2.pcre2_get_error_message_8(err, buff.ptr, buff.len);
 
         return .{

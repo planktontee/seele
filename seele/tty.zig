@@ -101,13 +101,14 @@ test "Rainbow to escape" {
 pub const EscapeColor = enum {
     boldRed,
     boldBlue,
+    boldCyan,
     boldMagenta,
     boldGreen,
     boldYellow,
-    boldCyan,
     boldBlack,
     boldWhite,
     green,
+    magenta,
     reset,
 
     pub fn escapeCode(self: @This()) []const u8 {
@@ -121,6 +122,7 @@ pub const EscapeColor = enum {
             .boldBlack => "\x1b[1;30m",
             .boldWhite => "\x1b[1;37m",
             .green => "\x1b[0;32m",
+            .magenta => "\x1b[0;35m",
             .reset => "\x1b[0m",
         };
     }

@@ -42,6 +42,15 @@ pub const EventHandler = union(enum) {
             inline else => |*handler| return try handler.handle(sink, event),
         }
     }
+
+    pub inline fn showFileName(
+        self: *@This(),
+        input: *const fs.DetailedFile,
+    ) void {
+        switch (self.*) {
+            inline else => |*handler| handler.fDetailed = input,
+        }
+    }
 };
 
 pub fn pickEventHandler(fDetailed: *const fs.DetailedFile, argsRes: *const args.ArgsRes) EventHandler {
@@ -77,7 +86,6 @@ pub fn pickEventHandler(fDetailed: *const fs.DetailedFile, argsRes: *const args.
                 };
             }
         },
-        .generic,
         .characterDevice,
         .file,
         .pipe,
@@ -120,7 +128,6 @@ pub fn pickSinkBuffer(
                 },
             };
         },
-        .generic,
         .characterDevice,
         .pipe,
         .file,
@@ -156,6 +163,7 @@ pub const EolEvent = struct {
 pub const MatchEvent = struct {
     line: []const u8,
     lineN: usize,
+    fDetailed: *const fs.DetailedFile,
     group: regex.RegexMatchGroup,
     hasMore: bool,
 
@@ -189,6 +197,7 @@ pub const MatchEvent = struct {
 pub const SimpleMatchEvent = struct {
     line: []const u8,
     lineN: usize,
+    fDetailed: *const fs.DetailedFile,
     group: regex.RegexMatchGroup,
 
     pub fn format(
@@ -220,6 +229,7 @@ pub const SimpleMatchEvent = struct {
 pub const BeforeGroup = struct {
     slice: []const u8,
     lineN: usize,
+    fDetailed: *const fs.DetailedFile,
     n: u16,
 
     pub fn format(
@@ -260,6 +270,7 @@ pub const EndOfGroups = struct {
 pub const LineEvent = struct {
     line: []const u8,
     lineN: usize,
+    fDetailed: *const fs.DetailedFile,
 
     pub fn format(
         self: *const @This(),
@@ -332,7 +343,14 @@ pub const Event = union(enum) {
             // NOTE: this will be incredibly wasteful
             // move to sink later as part of the trace mode
             const fileType: fs.FileType = rv: {
-                const detailedFile = fs.DetailedFile.from(std.fs.File.stderr()) catch
+                const stderrFd = std.fs.File.stderr();
+                const stat = stderrFd.stat() catch break :rv .file;
+                const detailedFile = fs.DetailedFile.from(
+                    stderrFd,
+                    "",
+                    "(stderr)",
+                    &stat,
+                ) catch
                     break :rv .file;
                 break :rv detailedFile.fileType;
             };
@@ -704,6 +722,7 @@ pub const GroupOnly = struct {
     delimiter: u8,
     writeLine: bool = true,
     showLines: bool,
+    fDetailed: ?*const fs.DetailedFile = null,
     lastLine: usize = 0,
 
     pub fn init(delimiter: u8, showLines: bool, pattern: tty.ColorPattern) @This() {
@@ -714,7 +733,7 @@ pub const GroupOnly = struct {
         };
     }
 
-    pub inline fn showLineDelimiter(self: *const @This()) []const u8 {
+    pub inline fn prefixDelimiter(self: *const @This()) []const u8 {
         // NOTE:
         // this is a comptime char -> str generator
         return switch (self.delimiter) {
@@ -735,7 +754,7 @@ pub const GroupOnly = struct {
                 if (!emptyEvent.hasMore) return .skipped;
 
                 if (self.writeLine)
-                    try MatchOnly.showLine(self, sink, colorPicker, emptyEvent.lineN);
+                    try MatchOnly.showPrefixes(self, sink, colorPicker, emptyEvent.lineN);
 
                 var chunks = colorPicker.chunks(1, emptyEvent.group.n);
                 chunks.clearChunk(&.{self.delimiter});
@@ -745,7 +764,7 @@ pub const GroupOnly = struct {
             },
             .groupMatch => |matchEvent| {
                 if (self.writeLine)
-                    try MatchOnly.showLine(self, sink, colorPicker, matchEvent.lineN);
+                    try MatchOnly.showPrefixes(self, sink, colorPicker, matchEvent.lineN);
 
                 var chunks = colorPicker.chunks(
                     2,
@@ -778,6 +797,7 @@ pub const GroupOnly = struct {
 pub const MatchOnly = struct {
     colorPicker: ColorPicker,
     showLines: bool,
+    fDetailed: ?*const fs.DetailedFile = null,
     writeLine: bool = true,
     lastLine: usize = 0,
 
@@ -788,7 +808,7 @@ pub const MatchOnly = struct {
         };
     }
 
-    pub inline fn showLineDelimiter(_: *const @This()) []const u8 {
+    pub inline fn prefixDelimiter(_: *const @This()) []const u8 {
         return SHOW_LINE_DELIMITER;
     }
 
@@ -803,6 +823,9 @@ pub const MatchOnly = struct {
             => |excluded| {
                 if (excluded.group.n == 0 and excluded.hasMore) return .cropLine;
 
+                if (self.writeLine)
+                    try self.showPrefixes(sink, colorPicker, excluded.lineN);
+
                 try MatchInLine.writeClear(
                     sink,
                     colorPicker,
@@ -815,7 +838,7 @@ pub const MatchOnly = struct {
                 if (before.n == 0) return .skipped;
 
                 if (self.writeLine)
-                    try self.showLine(sink, colorPicker, before.lineN);
+                    try self.showPrefixes(sink, colorPicker, before.lineN);
 
                 try MatchInLine.writeClear(
                     sink,
@@ -838,7 +861,7 @@ pub const MatchOnly = struct {
             .groupMatch,
             => |match| {
                 if (self.writeLine or match.group.n == 0)
-                    try self.showLine(sink, colorPicker, match.lineN);
+                    try self.showPrefixes(sink, colorPicker, match.lineN);
 
                 try MatchInLine.writeColored(
                     sink,
@@ -855,9 +878,9 @@ pub const MatchOnly = struct {
         };
     }
 
-    pub inline fn showLine(self: anytype, sink: *Sink, colorPicker: *ColorPicker, lineN: usize) Sink.ConsumeError!void {
+    pub inline fn showPrefixes(self: anytype, sink: *Sink, colorPicker: *ColorPicker, lineN: usize) Sink.ConsumeError!void {
         self.lastLine = 0;
-        try MatchInLine.showLine(
+        try MatchInLine.showPrefixes(
             self,
             sink,
             colorPicker,
@@ -905,6 +928,7 @@ pub const MatchOnly = struct {
 pub const NonMatchingLine = struct {
     colorPicker: ColorPicker,
     showLines: bool,
+    fDetailed: ?*const fs.DetailedFile = null,
     lastLine: usize = 0,
 
     pub fn init(showLines: bool, pattern: tty.ColorPattern) @This() {
@@ -914,7 +938,7 @@ pub const NonMatchingLine = struct {
         };
     }
 
-    pub inline fn showLineDelimiter(_: *const @This()) []const u8 {
+    pub inline fn prefixDelimiter(_: *const @This()) []const u8 {
         return SHOW_LINE_DELIMITER;
     }
 
@@ -968,6 +992,7 @@ pub const NonMatchingLine = struct {
 pub const LineOnMatch = struct {
     colorPicker: ColorPicker,
     showLines: bool,
+    fDetailed: ?*const fs.DetailedFile = null,
     lastLine: usize = 0,
 
     pub fn init(showLines: bool, pattern: tty.ColorPattern) @This() {
@@ -977,7 +1002,7 @@ pub const LineOnMatch = struct {
         };
     }
 
-    pub inline fn showLineDelimiter(_: *const @This()) []const u8 {
+    pub inline fn prefixDelimiter(_: *const @This()) []const u8 {
         return SHOW_LINE_DELIMITER;
     }
 
@@ -1026,7 +1051,7 @@ pub const LineOnMatch = struct {
         slice: []const u8,
         lineN: usize,
     ) Sink.ConsumeError!Sink.ConsumeResponse {
-        try MatchInLine.showLine(self, sink, colorPicker, lineN);
+        try MatchInLine.showPrefixes(self, sink, colorPicker, lineN);
         try MatchInLine.writeClear(sink, colorPicker, slice);
         return .consumedLine;
     }
@@ -1035,6 +1060,7 @@ pub const LineOnMatch = struct {
 pub const MatchInLine = struct {
     colorPicker: ColorPicker,
     showLines: bool,
+    fDetailed: ?*const fs.DetailedFile = null,
     lastLine: usize = 0,
 
     pub fn init(showLines: bool, pattern: tty.ColorPattern) @This() {
@@ -1044,7 +1070,7 @@ pub const MatchInLine = struct {
         };
     }
 
-    pub inline fn showLineDelimiter(_: *const @This()) []const u8 {
+    pub inline fn prefixDelimiter(_: *const @This()) []const u8 {
         return SHOW_LINE_DELIMITER;
     }
 
@@ -1080,8 +1106,9 @@ pub const MatchInLine = struct {
             ),
             .excludedGroup,
             .noMatch,
-            .endOfGroups,
             => return .skipped,
+            .endOfGroups,
+            => return try self.consumeEndOfGroups(sink, colorPicker, event),
             .eol,
             => return try MatchInLine.endOfLine(
                 sink,
@@ -1097,11 +1124,28 @@ pub const MatchInLine = struct {
         }
     }
 
+    pub inline fn consumeEndOfGroups(_: anytype, sink: *Sink, colorPicker: *ColorPicker, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
+        assert(event == .endOfGroups);
+        const endOfGroups = event.endOfGroups;
+
+        if (endOfGroups.group0Empty) return .skipped;
+        if (endOfGroups.hadBreakline) return .skipped;
+
+        if (endOfGroups.sliceOpt) |slice| {
+            var chunks = colorPicker.chunks(1, 0);
+            chunks.clearChunk(slice);
+            try sink.writeVecAll(chunks.slices());
+            return .consumed;
+        }
+
+        return .skipped;
+    }
+
     pub inline fn groupMatch(self: anytype, sink: *Sink, colorPicker: *ColorPicker, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
         assert(event == .groupMatch);
         const matchEvent = event.groupMatch;
 
-        try self.showLine(sink, colorPicker, matchEvent.lineN);
+        try self.showPrefixes(sink, colorPicker, matchEvent.lineN);
         try writeColored(
             sink,
             colorPicker,
@@ -1116,25 +1160,41 @@ pub const MatchInLine = struct {
         const beforeGroupEvent = event.beforeGroup;
         const slice = beforeGroupEvent.slice;
 
-        try self.showLine(sink, colorPicker, beforeGroupEvent.lineN);
+        try self.showPrefixes(sink, colorPicker, beforeGroupEvent.lineN);
         try writeClear(sink, colorPicker, slice);
 
         return .consumed;
     }
 
-    pub inline fn showLine(self: anytype, sink: *Sink, colorPicker: *ColorPicker, lineN: usize) Sink.ConsumeError!void {
+    pub inline fn showPrefixes(self: anytype, sink: *Sink, colorPicker: *ColorPicker, lineN: usize) Sink.ConsumeError!void {
         // NOTE: this is fine because we move away from direct io in case showLines is used
-        if (self.showLines and self.lastLine != lineN) {
-            var chunks = colorPicker.chunks(2, 0);
-            const buffLen = comptime std.fmt.count("{d}", .{std.math.maxInt(usize)});
-            var buff: [buffLen]u8 = undefined;
-            const lineNStr = try std.fmt.bufPrint(&buff, "{d}", .{lineN});
-            chunks.forceColoredChunk(tty.EscapeColor.green.escapeCode(), lineNStr);
-            chunks.forceColoredChunk(tty.EscapeColor.reset.escapeCode(), self.showLineDelimiter());
-            _ = colorPicker.reset();
+        if (self.lastLine != lineN) {
+            if (self.fDetailed) |fDetailed| {
+                var chunks = colorPicker.chunks(3, 0);
+                chunks.forceChunk(
+                    tty.EscapeColor.magenta.escapeCode(),
+                    fDetailed.path[0],
+                );
+                chunks.forceChunk(fDetailed.path[1], fDetailed.path[2]);
+                chunks.forceChunk(tty.EscapeColor.reset.escapeCode(), self.prefixDelimiter());
+                _ = colorPicker.reset();
 
-            try sink.writeVecAll(chunks.slices());
-            self.lastLine = lineN;
+                try sink.writeVecAll(chunks.slices());
+                self.lastLine = lineN;
+            }
+
+            if (self.showLines) {
+                var chunks = colorPicker.chunks(2, 0);
+                const buffLen = comptime std.fmt.count("{d}", .{std.math.maxInt(usize)});
+                var buff: [buffLen]u8 = undefined;
+                const lineNStr = try std.fmt.bufPrint(&buff, "{d}", .{lineN});
+                chunks.forceChunk(tty.EscapeColor.green.escapeCode(), lineNStr);
+                chunks.forceChunk(tty.EscapeColor.reset.escapeCode(), self.prefixDelimiter());
+                _ = colorPicker.reset();
+
+                try sink.writeVecAll(chunks.slices());
+                self.lastLine = lineN;
+            }
         }
     }
 
