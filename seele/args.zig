@@ -164,6 +164,7 @@ pub const Args = struct {
     @"ignore-case": bool = false,
     @"word-match": bool = false,
     @"line-number": bool = false,
+    @"no-file-name": bool = false,
     @"match-max": usize = std.math.maxInt(usize),
 
     multiline: bool = false,
@@ -197,12 +198,13 @@ pub const Args = struct {
         .w = .@"word-match",
         .n = .@"line-number",
         .m = .@"match-max",
+        .h = .@"no-file-name",
 
         .mL = .multiline,
         .R = .recursive,
         .fL = .@"follow-links",
 
-        .h = .@"group-highlight",
+        .gH = .@"group-highlight",
 
         .bR = .byteRanges,
     };
@@ -239,6 +241,7 @@ pub const Args = struct {
             .{ .field = .@"ignore-case", .description = "Ignore case regex flag" },
             .{ .field = .@"word-match", .description = "Match strings that have word boundary at start and end" },
             .{ .field = .@"line-number", .description = "Shows line number" },
+            .{ .field = .@"no-file-name", .description = "Suppress file name on output" },
             .{ .field = .@"match-max", .defaultHint = false, .description = "Match at most n number of matches." },
 
             .{ .field = .multiline, .description = "Multiline matching" },

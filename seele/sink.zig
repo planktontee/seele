@@ -51,6 +51,26 @@ pub const EventHandler = union(enum) {
             inline else => |*handler| handler.fDetailed = input,
         }
     }
+
+    pub inline fn restart(
+        self: *@This(),
+    ) void {
+        switch (self.*) {
+            inline else => |*handler| handler.restart(),
+        }
+    }
+
+    pub inline fn stderrMessage(
+        self: *@This(),
+        vec: [][]const u8,
+    ) Sink.ConsumeError!void {
+        switch (self.*) {
+            inline else => |*handler| {
+                vec[0] = handler.colorPicker.reset();
+                try Context.instance.stderrW.writeVecAll(vec);
+            },
+        }
+    }
 };
 
 pub fn pickEventHandler(fDetailed: *const fs.DetailedFile, argsRes: *const args.ArgsRes) EventHandler {
@@ -733,6 +753,11 @@ pub const GroupOnly = struct {
         };
     }
 
+    pub inline fn restart(self: *@This()) void {
+        self.lastLine = 0;
+        self.writeLine = true;
+    }
+
     pub inline fn prefixDelimiter(self: *const @This()) []const u8 {
         // NOTE:
         // this is a comptime char -> str generator
@@ -810,6 +835,11 @@ pub const MatchOnly = struct {
 
     pub inline fn prefixDelimiter(_: *const @This()) []const u8 {
         return SHOW_LINE_DELIMITER;
+    }
+
+    pub inline fn restart(self: *@This()) void {
+        self.lastLine = 0;
+        self.writeLine = true;
     }
 
     pub inline fn handle(self: *@This(), sink: *Sink, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
@@ -942,6 +972,10 @@ pub const NonMatchingLine = struct {
         return SHOW_LINE_DELIMITER;
     }
 
+    pub inline fn restart(self: *@This()) void {
+        self.lastLine = 0;
+    }
+
     pub inline fn handle(self: *@This(), sink: *Sink, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
         var colorPicker = &self.colorPicker;
         _ = &colorPicker;
@@ -1004,6 +1038,10 @@ pub const LineOnMatch = struct {
 
     pub inline fn prefixDelimiter(_: *const @This()) []const u8 {
         return SHOW_LINE_DELIMITER;
+    }
+
+    pub inline fn restart(self: *@This()) void {
+        self.lastLine = 0;
     }
 
     pub inline fn handle(self: *@This(), sink: *Sink, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
@@ -1072,6 +1110,10 @@ pub const MatchInLine = struct {
 
     pub inline fn prefixDelimiter(_: *const @This()) []const u8 {
         return SHOW_LINE_DELIMITER;
+    }
+
+    pub inline fn restart(self: *@This()) void {
+        self.lastLine = 0;
     }
 
     pub inline fn handle(self: *@This(), sink: *Sink, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
@@ -1170,13 +1212,14 @@ pub const MatchInLine = struct {
         // NOTE: this is fine because we move away from direct io in case showLines is used
         if (self.lastLine != lineN) {
             if (self.fDetailed) |fDetailed| {
-                var chunks = colorPicker.chunks(3, 0);
-                chunks.forceChunk(
+                var chunks = colorPicker.chunks(4, 0);
+                chunks.forceColoredChunk(
                     tty.EscapeColor.magenta.escapeCode(),
                     fDetailed.path[0],
                 );
-                chunks.forceChunk(fDetailed.path[1], fDetailed.path[2]);
-                chunks.forceChunk(tty.EscapeColor.reset.escapeCode(), self.prefixDelimiter());
+                chunks.forceChunk(fDetailed.path[1]);
+                chunks.forceChunk(fDetailed.path[2]);
+                chunks.forceColoredChunk(tty.EscapeColor.reset.escapeCode(), self.prefixDelimiter());
                 _ = colorPicker.reset();
 
                 try sink.writeVecAll(chunks.slices());
@@ -1188,8 +1231,8 @@ pub const MatchInLine = struct {
                 const buffLen = comptime std.fmt.count("{d}", .{std.math.maxInt(usize)});
                 var buff: [buffLen]u8 = undefined;
                 const lineNStr = try std.fmt.bufPrint(&buff, "{d}", .{lineN});
-                chunks.forceChunk(tty.EscapeColor.green.escapeCode(), lineNStr);
-                chunks.forceChunk(tty.EscapeColor.reset.escapeCode(), self.prefixDelimiter());
+                chunks.forceColoredChunk(tty.EscapeColor.green.escapeCode(), lineNStr);
+                chunks.forceColoredChunk(tty.EscapeColor.reset.escapeCode(), self.prefixDelimiter());
                 _ = colorPicker.reset();
 
                 try sink.writeVecAll(chunks.slices());

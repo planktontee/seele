@@ -56,8 +56,11 @@ pub fn main() !u8 {
 
         var stderrW = std.fs.File.stderr().writerStreaming(stderrWBuff);
         Context.instance.init(
+            null,
             heapAlloc,
+            null,
             heapAlloc,
+            null,
             heapAlloc,
             &stderrW,
         );
@@ -69,13 +72,14 @@ pub fn main() !u8 {
 pub fn stackBufferTrampoline(comptime size: usize) !RunReturn {
     defer Context.instance.deinit();
 
+    const scrapSize = units.ByteUnit.mb;
     const scrapAlloc = rv: {
         if (builtin.mode == .Debug) {
             var debugAlloc = DebugAlloc.init;
             break :rv debugAlloc.allocator();
         } else {
             var sfba = mem.stackFallback(
-                units.ByteUnit.mb,
+                scrapSize,
                 std.heap.page_allocator,
             );
             break :rv sfba.get();
@@ -115,8 +119,11 @@ pub fn stackBufferTrampoline(comptime size: usize) !RunReturn {
 
     var stderrW = std.fs.File.stderr().writerStreaming(stderrWBuff);
     Context.instance.init(
+        scrapSize,
         scrapAlloc,
+        size,
         inAlloc,
+        size,
         outAlloc,
         &stderrW,
     );
@@ -173,19 +180,16 @@ const MatchData = struct {
     lineN: usize,
     max: usize,
     fDetailed: *const fs.DetailedFile,
-    needFilePrefix: bool,
 
     pub fn init(
         max: usize,
         fDetailed: *const fs.DetailedFile,
-        needFilePrefix: bool,
     ) @This() {
         return .{
             .matchCount = 0,
             .lineN = 0,
             .max = max,
             .fDetailed = fDetailed,
-            .needFilePrefix = needFilePrefix,
         };
     }
 
@@ -276,13 +280,13 @@ pub fn run(comptime mode: sink.Mode, argsRes: *const args.ArgsRes) RunError!RunR
             matchData = .init(
                 argsRes.options.@"match-max",
                 &input,
-                showFileName,
             );
-            if (showFileName)
+            if (showFileName and !argsRes.options.@"no-file-name")
                 fSink.eventHandler.showFileName(&input);
         } else {
             try fSource.loadSource(&input);
             matchData.restart(&input);
+            fSink.eventHandler.restart();
         }
 
         try matchFile(
@@ -318,6 +322,9 @@ pub fn matchFile(
     // \K handling needs partial and other types of handling for anchoring
 
     // TODO: move cursors to event
+
+    // TODO: use a flag for best effort binary report
+    var hasBadLine: bool = false;
     fileLoop: while (true) {
         const readEvent = try fSource.nextLine();
         fileState: switch (readEvent) {
@@ -329,6 +336,9 @@ pub fn matchFile(
             .line,
             => |line| {
                 matchData.lineN += 1;
+                if (!hasBadLine)
+                    hasBadLine = !std.unicode.utf8ValidateSlice(line);
+
                 var lineCursor = LineMatchCursor.init(line);
 
                 lineLoop: while (lineCursor.hasReminder()) {
@@ -348,18 +358,15 @@ pub fn matchFile(
                         continue :fileState .eof;
                     }
 
-                    // NOTE:
-                    // This idea was taken from grep, needs testing but it does improve
-                    // performance
-                    lineCursor.skipBadUTF8();
-                    if (!lineCursor.hasReminder()) break :lineLoop;
-
-                    // TODO: handle bad utf8 as cropping
                     var groupCursor = try lineCursor.matchNext(
                         rgx,
                         fSink.eventHandler,
                         argsRes,
                     ) orelse {
+                        if (fSource.isInvalid() or hasBadLine) {
+                            lineCursor.finish();
+                            continue :lineLoop;
+                        }
                         if (lineCursor.hadMatches)
                             _ = try fSink.consume(mode, .{
                                 .afterMatch = .{
@@ -380,6 +387,20 @@ pub fn matchFile(
                         continue :lineLoop;
                     };
                     matchData.matchCount += 1;
+                    if (fSource.isInvalid() or hasBadLine) {
+                        var message: [6][]const u8 = .{
+                            // This will be filled (or not) by colorPicker
+                            "",
+                            "seele: ",
+                            matchData.fDetailed.path[0],
+                            matchData.fDetailed.path[1],
+                            matchData.fDetailed.path[2],
+                            ": binary file matches\n",
+                        };
+
+                        try fSink.eventHandler.stderrMessage(&message);
+                        continue :fileState .eof;
+                    }
 
                     groupLoop: while (groupCursor.hasNextGroup()) {
                         const group = groupCursor.peekGroup() catch |e| switch (e) {
@@ -736,38 +757,38 @@ pub const LineMatchCursor = struct {
         self.forwardTo(self.line.len);
     }
 
-    pub fn skipBadUTF8(self: *@This()) void {
-        var offset: usize = self.lineToken;
-        while (offset < self.line.len) {
-            const codePointLen: u3 = switch (self.line[offset]) {
-                0b0000_0000...0b0111_1111 => break,
-                0b1100_0000...0b1101_1111 => 2,
-                0b1110_0000...0b1110_1111 => 3,
-                0b1111_0000...0b1111_0111 => 4,
-                else => {
-                    offset += 1;
-                    continue;
-                },
-            };
-            switch (codePointLen) {
-                1 => unreachable,
-                inline else => |end| {
-                    if (offset + end > self.line.len) {
-                        offset = self.line.len;
-                        break;
-                    }
-
-                    if (std.unicode.utf8ValidateSlice(self.line[offset .. offset + end]))
-                        break
-                    else {
-                        offset += end;
-                        continue;
-                    }
-                },
-            }
-        }
-        self.forwardTo(offset);
-    }
+    // pub fn skipBadUTF8(self: *@This()) void {
+    //     var offset: usize = self.lineToken;
+    //     while (offset < self.line.len) {
+    //         const codePointLen: u3 = switch (self.line[offset]) {
+    //             0b0000_0000...0b0111_1111 => break,
+    //             0b1100_0000...0b1101_1111 => 2,
+    //             0b1110_0000...0b1110_1111 => 3,
+    //             0b1111_0000...0b1111_0111 => 4,
+    //             else => {
+    //                 offset += 1;
+    //                 continue;
+    //             },
+    //         };
+    //         switch (codePointLen) {
+    //             1 => unreachable,
+    //             inline else => |end| {
+    //                 if (offset + end > self.line.len) {
+    //                     offset = self.line.len;
+    //                     break;
+    //                 }
+    //
+    //                 if (std.unicode.utf8ValidateSlice(self.line[offset .. offset + end]))
+    //                     break
+    //                 else {
+    //                     offset += end;
+    //                     continue;
+    //                 }
+    //             },
+    //         }
+    //     }
+    //     self.forwardTo(offset);
+    // }
 
     pub fn forwardTo(self: *@This(), i: usize) void {
         assert(i <= self.line.len);

@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const units = @import("regent").units;
 const fs = @import("fs.zig");
 const c = @import("c.zig").c;
+const context = @import("context.zig");
 const File = std.fs.File;
 const Reader = std.Io.Reader;
 const Writer = std.Io.Writer;
@@ -21,7 +22,7 @@ pub const SourceBuffer = union(SourceBufferType) {
             .growing,
             => .{
                 .growing = .{
-                    .initialSize = units.ByteUnit.mb,
+                    .initialSize = units.ByteUnit.kb * 64,
                     .growthFactor = 3,
                 },
             },
@@ -38,6 +39,7 @@ pub fn pickSourceBuffer(fDetailed: *const fs.DetailedFile, isRecursive: bool) So
         .pipe,
         .characterDevice,
         => .growing,
+        // TODO: choose mmap when file size is within stack size
         .file,
         => if (isRecursive) .growing else .mmap,
     };
@@ -57,13 +59,24 @@ pub const ReadEvent = union(enum) {
 pub const MmapLineReader = struct {
     buffer: []align(std.heap.page_size_min) u8,
     reader: Reader,
+    isInvalidFlag: bool = false,
+
+    pub fn init(
+        self: *@This(),
+        buffer: []align(std.heap.page_size_min) u8,
+    ) void {
+        self.buffer = buffer;
+        self.reader = .fixed(buffer);
+        self.isInvalidFlag = FileValidatorReader.isInvalid(self.buffer);
+    }
 
     pub fn nextLine(self: *@This()) ReadEvent.Error!ReadEvent {
-        const line = self.reader.takeDelimiterInclusive('\n') catch |e| switch (e) {
+        var r = &self.reader;
+        const line = r.takeDelimiterInclusive('\n') catch |e| switch (e) {
             std.Io.Reader.DelimiterError.EndOfStream => {
-                if (self.reader.bufferedLen() == 0) return .eof;
-                const slice = self.reader.buffered();
-                self.reader.toss(slice.len);
+                if (r.bufferedLen() == 0) return .eof;
+                const slice = r.buffered();
+                r.toss(slice.len);
 
                 return .{ .eofChunk = slice };
             },
@@ -74,6 +87,10 @@ pub const MmapLineReader = struct {
         return .{ .line = line };
     }
 
+    pub fn isInvalid(self: *const @This()) bool {
+        return self.isInvalidFlag;
+    }
+
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         if (builtin.mode != .Debug) return;
         std.posix.munmap(self.buffer);
@@ -81,13 +98,10 @@ pub const MmapLineReader = struct {
     }
 
     // NOTE:
-    // mmap cannot be re-sourced because it's tied to a file and would need to be moved
-    // this isnt such a great idea but I havent seen a significant
-    // performance degradation from this
+    // This is actually not that bad for smaller files
     pub fn loadSource(self: *@This(), fDetailed: *const fs.DetailedFile) MmapBufferError!void {
         std.posix.munmap(self.buffer);
-        self.buffer = try mmapBuffer(fDetailed);
-        self.reader = .fixed(self.buffer);
+        self.init(try mmapBuffer(fDetailed));
     }
 
     pub const MmapBufferError = std.posix.MMapError || std.posix.MadviseError;
@@ -115,10 +129,158 @@ pub const MmapLineReader = struct {
     }
 };
 
+// Paper-thin layer over the backend Reader
+// It will keep both of them in sync between vtable runs and
+// perform binary checks for new data
+pub const FileValidatorReader = struct {
+    interface: Reader,
+    backend: *Reader,
+    isInvalidFlag: bool = false,
+
+    pub fn init(backend: *Reader) @This() {
+        return .{
+            .interface = .{
+                .buffer = backend.buffer,
+                .seek = backend.seek,
+                .end = backend.end,
+                .vtable = &.{
+                    .stream = &@This().stream,
+                    .discard = &@This().discard,
+                    .readVec = &@This().readVec,
+                    .rebase = &@This().rebase,
+                },
+            },
+            .backend = backend,
+        };
+    }
+
+    pub fn stream(r: *Reader, w: *Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+        const self: *@This() = @fieldParentPtr("interface", r);
+        self.syncBackend();
+        const chunk = self.backend.vtable.stream(self.backend, w, limit) catch |e| switch (e) {
+            else => {
+                self.checkFile();
+                self.syncFromBackend();
+                return e;
+            },
+        };
+        self.checkFile();
+        self.syncFromBackend();
+        return chunk;
+    }
+
+    pub fn discard(r: *Reader, limit: std.Io.Limit) std.Io.Reader.Error!usize {
+        const self: *@This() = @fieldParentPtr("interface", r);
+        self.syncBackend();
+        const chunk = self.backend.vtable.discard(self.backend, limit) catch |e| switch (e) {
+            else => {
+                self.syncFromBackend();
+                return e;
+            },
+        };
+        self.syncFromBackend();
+        return chunk;
+    }
+
+    pub fn readVec(r: *Reader, data: [][]u8) std.Io.Reader.Error!usize {
+        const self: *@This() = @fieldParentPtr("interface", r);
+        self.syncBackend();
+        const chunk = self.backend.vtable.readVec(self.backend, data) catch |e| switch (e) {
+            else => {
+                self.checkFile();
+                self.syncFromBackend();
+                return e;
+            },
+        };
+        self.checkFile();
+        self.syncFromBackend();
+        return chunk;
+    }
+
+    pub fn rebase(r: *Reader, capacity: usize) std.Io.Reader.RebaseError!void {
+        const self: *@This() = @fieldParentPtr("interface", r);
+        self.syncBackend();
+        self.backend.vtable.rebase(self.backend, capacity) catch |e| switch (e) {
+            else => {
+                self.syncFromBackend();
+                return e;
+            },
+        };
+        self.syncFromBackend();
+    }
+
+    pub inline fn syncFromBackend(self: *@This()) void {
+        self.interface.seek = self.backend.seek;
+        self.interface.end = self.backend.end;
+        self.interface.buffer = self.backend.buffer;
+    }
+
+    pub inline fn syncBackend(self: *@This()) void {
+        self.backend.seek = self.interface.seek;
+        self.backend.end = self.interface.end;
+        self.backend.buffer = self.interface.buffer;
+    }
+
+    pub fn checkFile(self: *@This()) void {
+        if (self.isInvalidFlag) return;
+        if (self.interface.end >= self.backend.end) return;
+
+        const slice = self.backend.buffer[self.interface.end..self.backend.end];
+        self.isInvalidFlag = isInvalid(slice);
+    }
+
+    pub fn isInvalid(slice: []const u8) bool {
+        return isBinary(slice);
+    }
+
+    pub fn isBinary(chunk: []const u8) bool {
+        var remaining = chunk;
+
+        if (comptime std.simd.suggestVectorLength(u8)) |VLen| {
+            const Chunk = @Vector(VLen, u8);
+
+            while (remaining.len >= VLen) {
+                const chunkVec: Chunk = remaining[0..VLen].*;
+
+                if (@reduce(.Min, chunkVec) == '\x00') {
+                    return true;
+                }
+                remaining = remaining[VLen..];
+            }
+        }
+
+        for (remaining) |chr| if (chr == '\x00') {
+            return true;
+        };
+        return false;
+    }
+};
+
 pub const GrowingLineReader = struct {
     allocator: std.mem.Allocator,
     growthFactor: usize,
     fsReader: File.Reader,
+    fileValidatorR: FileValidatorReader,
+
+    pub fn init(
+        self: *@This(),
+        allocator: std.mem.Allocator,
+        growthFactor: usize,
+        buff: []u8,
+        fDetailed: *const fs.DetailedFile,
+    ) void {
+        self.allocator = allocator;
+        self.growthFactor = growthFactor;
+        self.newReader(buff, fDetailed);
+    }
+
+    pub inline fn newReader(self: *@This(), buff: []u8, fDetailed: *const fs.DetailedFile) void {
+        self.fsReader = switch (fDetailed.accessType) {
+            .streaming => fDetailed.file.readerStreaming(buff),
+            .positional => fDetailed.file.reader(buff),
+        };
+        self.fileValidatorR = .init(&self.fsReader.interface);
+    }
 
     pub const Config = struct {
         growthFactor: usize,
@@ -126,7 +288,7 @@ pub const GrowingLineReader = struct {
     };
 
     pub fn nextLine(self: *@This()) ReadEvent.Error!ReadEvent {
-        var r = &self.fsReader;
+        var r = &self.fileValidatorR;
         var reader = &r.interface;
         const line = reader.takeDelimiterInclusive('\n') catch |e| switch (e) {
             std.Io.Reader.DelimiterError.EndOfStream => {
@@ -136,10 +298,18 @@ pub const GrowingLineReader = struct {
                 return .{ .eofChunk = slice };
             },
             std.Io.Reader.DelimiterError.StreamTooLong => {
+                const targetSize = reader.buffer.len * self.growthFactor;
                 const newBuff: []u8 = self.allocator.remap(
                     reader.buffer,
-                    reader.buffer.len * self.growthFactor,
-                ) orelse return ReadEvent.Error.OutOfMemory;
+                    targetSize,
+                ) orelse rv: {
+                    // NOTE:
+                    // remap will return null if it wants you to do the work, so here we are
+                    const nb = try self.allocator.alloc(u8, targetSize);
+                    @memcpy(nb[0..reader.buffer.len], reader.buffer);
+                    self.allocator.free(reader.buffer);
+                    break :rv nb;
+                };
                 reader.buffer = newBuff;
                 return try self.nextLine();
             },
@@ -149,18 +319,17 @@ pub const GrowingLineReader = struct {
         return .{ .line = line };
     }
 
+    pub fn isInvalid(self: *const @This()) bool {
+        return self.fileValidatorR.isInvalidFlag;
+    }
+
     pub fn loadSource(self: *@This(), fDetailed: *const fs.DetailedFile) !void {
-        const buff = self.fsReader.interface.buffer;
-        const fsReader = switch (fDetailed.accessType) {
-            .streaming => fDetailed.file.readerStreaming(buff),
-            .positional => fDetailed.file.reader(buff),
-        };
-        self.fsReader = fsReader;
+        self.newReader(self.fsReader.interface.buffer, fDetailed);
     }
 
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         if (builtin.mode != .Debug) return;
-        self.allocator.free(self.fsReader.interface.buffer);
+        self.allocator.free(self.fileValidatorR.interface.buffer);
         allocator.destroy(self);
     }
 };
@@ -192,16 +361,14 @@ pub const SourceReader = union(SourceBufferType) {
                 errdefer allocator.destroy(inPlace);
 
                 const buff = try allocator.alloc(u8, config.initialSize);
-                const fsReader = switch (fDetailed.accessType) {
-                    .streaming => fDetailed.file.readerStreaming(buff),
-                    .positional => fDetailed.file.reader(buff),
-                };
 
-                inPlace.* = .{
-                    .allocator = allocator,
-                    .growthFactor = config.growthFactor,
-                    .fsReader = fsReader,
-                };
+                inPlace.init(
+                    allocator,
+                    config.growthFactor,
+                    buff,
+                    fDetailed,
+                );
+
                 break :rv .{ .growing = inPlace };
             },
             .mmap => rv: {
@@ -209,11 +376,8 @@ pub const SourceReader = union(SourceBufferType) {
                 errdefer allocator.destroy(mmapSrc);
 
                 const buff: []align(std.heap.page_size_min) u8 = try MmapLineReader.mmapBuffer(fDetailed);
+                mmapSrc.init(buff);
 
-                mmapSrc.* = .{
-                    .buffer = buff,
-                    .reader = .fixed(buff),
-                };
                 break :rv .{ .mmap = mmapSrc };
             },
         };
@@ -232,6 +396,12 @@ pub const Source = struct {
         return .{
             .sourceReader = try .init(fDetailed, allocator, isRecursive),
             .fDetailed = fDetailed,
+        };
+    }
+
+    pub fn isInvalid(self: *const @This()) bool {
+        return switch (self.sourceReader) {
+            inline else => |source| source.isInvalid(),
         };
     }
 

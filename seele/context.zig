@@ -9,16 +9,22 @@ const DebugAlloc = std.heap.DebugAllocator(.{
     .safety = true,
 });
 
+scrapSize: ?usize,
 scrapAlloc: Allocator,
+inSize: ?usize,
 inAlloc: Allocator,
+outSize: ?usize,
 outAlloc: Allocator,
 fdWriter: *FileWriter,
 stderrW: *Writer,
 
 pub fn init(
     self: *@This(),
+    scrapSize: ?usize,
     scrapAlloc: Allocator,
+    inSize: ?usize,
     inAlloc: Allocator,
+    outSize: ?usize,
     outAlloc: Allocator,
     fdWriter: *FileWriter,
 ) void {
@@ -26,8 +32,11 @@ pub fn init(
         // NOTE: Split matters because of how stack allocator works
         // if I put the input buffer before the output buffer, it cant
         // grow and vice-versa
+        .scrapSize = scrapSize,
         .scrapAlloc = scrapAlloc,
+        .inSize = inSize,
         .inAlloc = inAlloc,
+        .outSize = outSize,
         .outAlloc = outAlloc,
         .fdWriter = fdWriter,
         .stderrW = &fdWriter.interface,

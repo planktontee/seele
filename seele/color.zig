@@ -116,6 +116,10 @@ pub fn ColoredChunks(comptime n: std.math.IntFittingRange(0, std.math.maxInt(usi
             self.at += 2;
         }
 
+        pub fn forceChunk(self: *@This(), chunk: []const u8) void {
+            self.forceColoredChunk("", chunk);
+        }
+
         pub fn skipChunk(self: *@This()) void {
             assert(self.at + 2 <= self.slices.len);
             self.slices[self.at] = "";
@@ -179,6 +183,10 @@ pub fn UncoloredChunks(comptime size: usize) type {
             self.clearChunk(chunk);
         }
 
+        pub fn forceChunk(self: *@This(), chunk: []const u8) void {
+            self.clearChunk(chunk);
+        }
+
         pub fn breakline(self: *@This()) void {
             assert(self.at + 1 == size);
             if (self.at == 0 or size <= 1) {
@@ -218,7 +226,13 @@ pub fn Chunks(comptime size: usize) type {
 
         // NOTE:
         // this does not alter the colorPicker state
-        pub inline fn forceChunk(self: *@This(), color: []const u8, chunk: []const u8) void {
+        pub inline fn forceChunk(self: *@This(), chunk: []const u8) void {
+            switch (self.*) {
+                inline else => |*chunks| chunks.forceChunk(chunk),
+            }
+        }
+
+        pub inline fn forceColoredChunk(self: *@This(), color: []const u8, chunk: []const u8) void {
             switch (self.*) {
                 inline else => |*chunks| chunks.forceColoredChunk(color, chunk),
             }

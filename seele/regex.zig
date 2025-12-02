@@ -54,10 +54,11 @@ pub fn compile(
 
     var err: c_int = undefined;
     var errOff: usize = undefined;
+    const flags: u32 = @bitCast(options.flags);
     const re = pcre2.pcre2_compile_8(
         pattern.ptr,
         pattern.len,
-        @bitCast(options.flags),
+        flags,
         &err,
         &errOff,
         compContext,
@@ -112,12 +113,13 @@ pub const Regex = struct {
     }
 
     pub fn offsetMatch(self: *const @This(), data: []const u8, offset: usize) MatchError!?RegexMatch {
-        const rc = pcre2.pcre2_jit_match_8(
+        const flags: u32 = @bitCast(ExecutionFlags{});
+        const rc = pcre2.pcre2_match_8(
             self.re,
             data.ptr,
             data.len,
             offset,
-            @bitCast(ExecutionFlags{}),
+            flags,
             self.matchData,
             null,
         );
@@ -264,7 +266,7 @@ pub const CompileFlags = packed struct(u32) {
     altBsux: bool = false,
     autoCallout: bool = false,
     caseless: bool = false,
-    dollarEndonly: bool = false,
+    dollarEndOnly: bool = false,
     dotall: bool = false,
     dupnames: bool = false,
     extended: bool = false,
@@ -277,9 +279,9 @@ pub const CompileFlags = packed struct(u32) {
     noAutoPossess: bool = false,
     noDotStartAnchor: bool = false,
     noStartOptimize: bool = false,
-    ucp: bool = false,
+    ucp: bool = true,
     ungreedy: bool = false,
-    utf: bool = false,
+    utf: bool = true,
     neverBacklashC: bool = false,
     altCircumflex: bool = false,
     altVerbNames: bool = false,
