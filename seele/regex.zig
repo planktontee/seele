@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const assert = std.debug.assert;
-const pcre2 = @import("c.zig").pcre2;
+const c = @import("c.zig").c;
 const Result = @import("regent").result.Result;
 
 pub const sink = @import("./sink.zig");
@@ -28,34 +28,35 @@ pub const RegexError = struct {
     }
 };
 
-// TODO: extract flags from pattern
+// TODO: add own memory allocators
 pub fn compile(
     allocator: std.mem.Allocator,
     pattern: []const u8,
     options: CompileOptions,
 ) CompileError!Result(Regex, RegexError) {
-    const compContext = pcre2.pcre2_compile_context_create_8(null) orelse {
+    const compContext = c.pcre2_compile_context_create_8(null) orelse {
         return CompileError.RegexInitFailed;
     };
-    errdefer pcre2.pcre2_compile_context_free_8(compContext);
+    errdefer c.pcre2_compile_context_free_8(compContext);
 
-    switch (pcre2.pcre2_set_newline_8(compContext, pcre2.PCRE2_NEWLINE_LF)) {
+    switch (c.pcre2_set_newline_8(compContext, c.PCRE2_NEWLINE_LF)) {
         0 => {},
-        pcre2.PCRE2_ERROR_BADDATA => return CompileError.RegexInitFailed,
+        c.PCRE2_ERROR_BADDATA => return CompileError.RegexInitFailed,
         // NOTE: no other error codes are defined in the source
         else => unreachable,
     }
 
     // it's just an attribute set
-    _ = pcre2.pcre2_set_compile_extra_options_8(
+    const extraFlags: u32 = @intCast(@as(u17, @bitCast(options.extraFlags)));
+    _ = c.pcre2_set_compile_extra_options_8(
         compContext,
-        @intCast(@as(u17, @bitCast(options.extraFlags))),
+        extraFlags,
     );
 
     var err: c_int = undefined;
     var errOff: usize = undefined;
     const flags: u32 = @bitCast(options.flags);
-    const re = pcre2.pcre2_compile_8(
+    const re = c.pcre2_compile_8(
         pattern.ptr,
         pattern.len,
         flags,
@@ -64,7 +65,7 @@ pub fn compile(
         compContext,
     ) orelse {
         const buff = try allocator.alloc(u8, 4096);
-        const end = pcre2.pcre2_get_error_message_8(err, buff.ptr, buff.len);
+        const end = c.pcre2_get_error_message_8(err, buff.ptr, buff.len);
 
         return .{
             .Err = .{
@@ -75,9 +76,9 @@ pub fn compile(
             },
         };
     };
-    _ = pcre2.pcre2_jit_compile_8(re, pcre2.PCRE2_JIT_COMPLETE);
+    _ = c.pcre2_jit_compile_8(re, c.PCRE2_JIT_COMPLETE);
 
-    const matchData = pcre2.pcre2_match_data_create_from_pattern_8(re, null) orelse {
+    const matchData = c.pcre2_match_data_create_from_pattern_8(re, null) orelse {
         return CompileError.MatchDataInitFailed;
     };
 
@@ -91,20 +92,22 @@ pub fn compile(
 }
 
 pub const Regex = struct {
-    re: *pcre2.pcre2_code_8,
-    compContext: *pcre2.pcre2_compile_context_8,
-    matchData: *pcre2.pcre2_match_data_8,
+    re: *c.pcre2_code_8,
+    compContext: *c.pcre2_compile_context_8,
+    matchData: *c.pcre2_match_data_8,
 
     pub fn deinit(self: *@This()) void {
         if (builtin.mode == .Debug) return;
-        pcre2.pcre2_match_data_free_8(self.matchData);
+        c.pcre2_match_data_free_8(self.matchData);
         self.matchData = undefined;
-        pcre2.pcre2_code_free_8(self.re);
+        c.pcre2_code_free_8(self.re);
         self.re = undefined;
     }
 
     pub const MatchError = error{
-        MatchDataNotAvailable,
+        MatchDataTooBig,
+        NoMatch,
+        BadUTF8Encode,
         UnknownError,
     };
 
@@ -112,9 +115,18 @@ pub const Regex = struct {
         return try self.offsetMatch(data, 0);
     }
 
-    pub fn offsetMatch(self: *const @This(), data: []const u8, offset: usize) MatchError!?RegexMatch {
-        const flags: u32 = @bitCast(ExecutionFlags{});
-        const rc = pcre2.pcre2_match_8(
+    pub fn offsetMatch(
+        self: *const @This(),
+        data: []const u8,
+        offset: usize,
+        isLineStart: bool,
+        validateUtf8: bool,
+    ) MatchError!RegexMatch {
+        const flags: u32 = @bitCast(ExecutionFlags{
+            .notBol = !isLineStart,
+            .noUTFCheck = !validateUtf8,
+        });
+        const rc = c.pcre2_match_8(
             self.re,
             data.ptr,
             data.len,
@@ -124,23 +136,22 @@ pub const Regex = struct {
             null,
         );
         if (rc <= 0) {
-            // TODO: identify BADUTF8
             switch (rc) {
                 // NOTE: this implies ovector is not big enough for all substr
                 // matches
-                0 => return MatchError.MatchDataNotAvailable,
-                pcre2.PCRE2_ERROR_NOMATCH => {
-                    return null;
-                },
+                0 => return MatchError.MatchDataTooBig,
+                c.PCRE2_ERROR_NOMATCH => return MatchError.NoMatch,
+                // -23 ... -3
+                c.PCRE2_ERROR_UTF8_ERR21...c.PCRE2_ERROR_UTF8_ERR1 => return MatchError.BadUTF8Encode,
                 // NOTE: most error are data related or group related or utf related
                 // check the ERROR definition in the lib
                 else => return MatchError.UnknownError,
             }
         }
 
-        const ovect = pcre2.pcre2_get_ovector_pointer_8(self.matchData);
+        const ovect = c.pcre2_get_ovector_pointer_8(self.matchData);
 
-        std.debug.assert(rc >= 0);
+        assert(rc >= 0);
         return .init(ovect, @intCast(rc));
     }
 };
@@ -200,11 +211,11 @@ pub const RegexMatch = struct {
         const start = n * 2;
         const end = n * 2 + 1;
         const idx0 = self.ovector[start];
-        if (idx0 == pcre2.PCRE2_UNSET) return GroupError.GroupSkipped;
+        if (idx0 == c.PCRE2_UNSET) return GroupError.GroupSkipped;
         const idx1 = self.ovector[end];
 
-        assert(idx0 != pcre2.PCRE2_UNSET);
-        assert(idx1 != pcre2.PCRE2_UNSET);
+        assert(idx0 != c.PCRE2_UNSET);
+        assert(idx1 != c.PCRE2_UNSET);
         return .init(@intCast(n), idx0, idx1);
     }
 };
@@ -237,7 +248,7 @@ pub const ExecutionFlags = packed struct(u32) {
     // 20 - 29 inclusive
     _: u10 = 0,
     anchored: bool = false,
-    noUTFCheck: bool = true,
+    noUTFCheck: bool = false,
     endAnchored: bool = false,
 };
 
@@ -250,7 +261,7 @@ pub const ExtraCompileFlags = packed struct(u17) {
     altBsux: bool = false,
     allowLookaroundBsk: bool = false,
     caselessRestrict: bool = false,
-    asciiBsd: bool = false,
+    asciiBsd: bool = true,
     asciiBss: bool = false,
     asciiBsw: bool = false,
     asciiPosix: bool = false,
@@ -266,7 +277,7 @@ pub const CompileFlags = packed struct(u32) {
     altBsux: bool = false,
     autoCallout: bool = false,
     caseless: bool = false,
-    dollarEndOnly: bool = false,
+    dollarEndOnly: bool = true,
     dotall: bool = false,
     dupnames: bool = false,
     extended: bool = false,
@@ -288,10 +299,10 @@ pub const CompileFlags = packed struct(u32) {
     useOffsetLimit: bool = false,
     extendedMore: bool = false,
     literal: bool = false,
-    matchInvalidUTF: bool = false,
+    matchInvalidUTF: bool = true,
     altExtendedClass: bool = false,
     _: bool = false,
     anchored: bool = false,
-    noUTFCheck: bool = true,
+    noUTFCheck: bool = false,
     endAchored: bool = false,
 };

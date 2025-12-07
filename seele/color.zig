@@ -7,6 +7,7 @@ pub const ColorPicker = struct {
     colorPattern: tty.ColorPattern = .escape,
     trueColor: bool,
     state: State = .reset,
+    chunksBuff: [20][]const u8 = undefined,
 
     pub const State = union(enum) {
         reset,
@@ -66,20 +67,34 @@ pub const ColorPicker = struct {
     }
 
     pub fn chunks(self: *@This(), comptime size: usize, offset: u16) Chunks(size) {
-        return Chunks(size).init(self, offset);
+        return Chunks(size).init(
+            self.chunksBuff[0..if (self.colorPattern == .noColor)
+                size
+            else
+                size * 2],
+            self,
+            offset,
+        );
     }
 };
 
-pub fn ColoredChunks(comptime n: std.math.IntFittingRange(0, std.math.maxInt(usize) / 2)) type {
+pub fn ColoredChunks(
+    comptime n: std.math.IntFittingRange(0, std.math.maxInt(usize) / 2),
+) type {
     const size = n * 2;
     return struct {
         colorOffset: u16 = undefined,
-        slices: [size][]const u8 = undefined,
+        slices: [][]const u8,
         at: usize = 0,
         colorPicker: *ColorPicker = undefined,
 
-        pub fn init(colorPicker: *ColorPicker, offset: u16) @This() {
+        pub fn init(
+            slices: [][]const u8,
+            colorPicker: *ColorPicker,
+            offset: u16,
+        ) @This() {
             return .{
+                .slices = slices,
                 .colorPicker = colorPicker,
                 .colorOffset = offset,
             };
@@ -160,10 +175,14 @@ pub fn ColoredChunks(comptime n: std.math.IntFittingRange(0, std.math.maxInt(usi
 
 pub fn UncoloredChunks(comptime size: usize) type {
     return struct {
-        slices: [size][]const u8 = undefined,
+        slices: [][]const u8,
         at: usize = 0,
 
-        pub const init: @This() = .{};
+        pub fn init(slices: [][]const u8) @This() {
+            return .{
+                .slices = slices,
+            };
+        }
 
         pub fn clearChunk(self: *@This(), chunk: []const u8) void {
             assert(self.at + 1 <= self.slices.len);
@@ -211,10 +230,14 @@ pub fn Chunks(comptime size: usize) type {
         colored: ColoredChunks(size),
         uncolored: UncoloredChunks(size),
 
-        pub fn init(picker: *ColorPicker, offset: u16) @This() {
+        pub fn init(
+            slicesBuff: [][]const u8,
+            picker: *ColorPicker,
+            offset: u16,
+        ) @This() {
             return switch (picker.colorPattern) {
-                .noColor => .{ .uncolored = .init },
-                else => .{ .colored = .init(picker, offset) },
+                .noColor => .{ .uncolored = .init(slicesBuff) },
+                else => .{ .colored = .init(slicesBuff, picker, offset) },
             };
         }
 
@@ -258,7 +281,7 @@ pub fn Chunks(comptime size: usize) type {
 
         pub fn slices(self: *@This()) [][]const u8 {
             switch (self.*) {
-                inline else => |*c| return &c.slices,
+                inline else => |*c| return c.slices,
             }
         }
     };

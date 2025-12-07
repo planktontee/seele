@@ -167,6 +167,9 @@ pub const Args = struct {
     @"no-file-name": bool = false,
     @"match-max": usize = std.math.maxInt(usize),
 
+    @"skip-binary": bool = false,
+    @"validate-utf8": bool = false,
+
     multiline: bool = false,
     recursive: bool = false,
     @"follow-links": bool = false,
@@ -197,8 +200,11 @@ pub const Args = struct {
         .i = .@"ignore-case",
         .w = .@"word-match",
         .n = .@"line-number",
-        .m = .@"match-max",
         .h = .@"no-file-name",
+        .m = .@"match-max",
+
+        .vB = .@"skip-binary",
+        .vU = .@"validate-utf8",
 
         .mL = .multiline,
         .R = .recursive,
@@ -243,6 +249,9 @@ pub const Args = struct {
             .{ .field = .@"line-number", .description = "Shows line number" },
             .{ .field = .@"no-file-name", .description = "Suppress file name on output" },
             .{ .field = .@"match-max", .defaultHint = false, .description = "Match at most n number of matches." },
+
+            .{ .field = .@"skip-binary", .description = "Skip binary files (this requires all bytes to be checked)" },
+            .{ .field = .@"validate-utf8", .description = "Validate ut8 (this requires all bytes to be checked)" },
 
             .{ .field = .multiline, .description = "Multiline matching" },
             .{ .field = .recursive, .description = "Recursively matches all files in paths" },
@@ -376,6 +385,7 @@ pub const Args = struct {
         return .{
             .flags = .{
                 .caseless = self.@"ignore-case",
+                .noUTFCheck = self.@"validate-utf8",
             },
             .extraFlags = .{
                 .matchWord = self.@"word-match",

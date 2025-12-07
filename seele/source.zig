@@ -60,14 +60,17 @@ pub const MmapLineReader = struct {
     buffer: []align(std.heap.page_size_min) u8,
     reader: Reader,
     isInvalidFlag: bool = false,
+    validateBin: bool = false,
 
     pub fn init(
         self: *@This(),
         buffer: []align(std.heap.page_size_min) u8,
+        validateBin: bool,
     ) void {
         self.buffer = buffer;
         self.reader = .fixed(buffer);
-        self.isInvalidFlag = FileValidatorReader.isInvalid(self.buffer);
+        self.validateBin = validateBin;
+        self.isInvalidFlag = if (validateBin) FileValidatorReader.isInvalid(self.buffer) else false;
     }
 
     pub fn nextLine(self: *@This()) ReadEvent.Error!ReadEvent {
@@ -101,7 +104,7 @@ pub const MmapLineReader = struct {
     // This is actually not that bad for smaller files
     pub fn loadSource(self: *@This(), fDetailed: *const fs.DetailedFile) MmapBufferError!void {
         std.posix.munmap(self.buffer);
-        self.init(try mmapBuffer(fDetailed));
+        self.init(try mmapBuffer(fDetailed), self.validateBin);
     }
 
     pub const MmapBufferError = std.posix.MMapError || std.posix.MadviseError;
@@ -261,6 +264,7 @@ pub const GrowingLineReader = struct {
     growthFactor: usize,
     fsReader: File.Reader,
     fileValidatorR: FileValidatorReader,
+    validateBin: bool,
 
     pub fn init(
         self: *@This(),
@@ -268,9 +272,11 @@ pub const GrowingLineReader = struct {
         growthFactor: usize,
         buff: []u8,
         fDetailed: *const fs.DetailedFile,
+        validateBin: bool,
     ) void {
         self.allocator = allocator;
         self.growthFactor = growthFactor;
+        self.validateBin = validateBin;
         self.newReader(buff, fDetailed);
     }
 
@@ -288,8 +294,11 @@ pub const GrowingLineReader = struct {
     };
 
     pub fn nextLine(self: *@This()) ReadEvent.Error!ReadEvent {
-        var r = &self.fileValidatorR;
-        var reader = &r.interface;
+        var reader = if (self.validateBin)
+            &self.fileValidatorR.interface
+        else
+            &self.fsReader.interface;
+
         const line = reader.takeDelimiterInclusive('\n') catch |e| switch (e) {
             std.Io.Reader.DelimiterError.EndOfStream => {
                 if (reader.bufferedLen() == 0) return .eof;
@@ -346,15 +355,22 @@ pub const SourceReader = union(SourceBufferType) {
         fDetailed: *const fs.DetailedFile,
         allocator: std.mem.Allocator,
         isRecursive: bool,
+        validateBin: bool,
     ) InitError!@This() {
         return try .initWithBufferType(
             pickSourceBuffer(fDetailed, isRecursive),
             fDetailed,
             allocator,
+            validateBin,
         );
     }
 
-    pub fn initWithBufferType(bufferType: SourceBufferType, fDetailed: *const fs.DetailedFile, allocator: std.mem.Allocator) InitError!@This() {
+    pub fn initWithBufferType(
+        bufferType: SourceBufferType,
+        fDetailed: *const fs.DetailedFile,
+        allocator: std.mem.Allocator,
+        validateBin: bool,
+    ) InitError!@This() {
         return switch (SourceBuffer.fromType(bufferType)) {
             .growing => |config| rv: {
                 const inPlace = try allocator.create(GrowingLineReader);
@@ -367,6 +383,7 @@ pub const SourceReader = union(SourceBufferType) {
                     config.growthFactor,
                     buff,
                     fDetailed,
+                    validateBin,
                 );
 
                 break :rv .{ .growing = inPlace };
@@ -376,7 +393,7 @@ pub const SourceReader = union(SourceBufferType) {
                 errdefer allocator.destroy(mmapSrc);
 
                 const buff: []align(std.heap.page_size_min) u8 = try MmapLineReader.mmapBuffer(fDetailed);
-                mmapSrc.init(buff);
+                mmapSrc.init(buff, validateBin);
 
                 break :rv .{ .mmap = mmapSrc };
             },
@@ -392,9 +409,10 @@ pub const Source = struct {
         fDetailed: *const fs.DetailedFile,
         allocator: std.mem.Allocator,
         isRecursive: bool,
+        validateBin: bool,
     ) SourceReader.InitError!@This() {
         return .{
-            .sourceReader = try .init(fDetailed, allocator, isRecursive),
+            .sourceReader = try .init(fDetailed, allocator, isRecursive, validateBin),
             .fDetailed = fDetailed,
         };
     }
