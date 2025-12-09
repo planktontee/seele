@@ -201,7 +201,7 @@ pub const BaseEvent = struct {
 
 pub const MatchEvent = struct {
     base: *const BaseEvent,
-    group: regex.RegexMatchGroup,
+    group: *const regex.RegexMatchGroup,
     hasMore: bool,
 
     pub fn format(
@@ -223,7 +223,7 @@ pub const MatchEvent = struct {
         );
 
         try writer.print(" {f} .hasMore {any} .lineN {d} {c}", .{
-            self.group,
+            self.group.*,
             self.hasMore,
             self.base.lineN,
             '}',
@@ -233,7 +233,7 @@ pub const MatchEvent = struct {
 
 pub const SimpleMatchEvent = struct {
     base: *const BaseEvent,
-    group: regex.RegexMatchGroup,
+    group: *const regex.RegexMatchGroup,
 
     pub fn format(
         self: *const @This(),
@@ -254,7 +254,7 @@ pub const SimpleMatchEvent = struct {
         );
 
         try writer.print(" {f} .lineN {d} {c}", .{
-            self.group,
+            self.group.*,
             self.base.lineN,
             '}',
         });
@@ -479,7 +479,7 @@ pub const Event = union(enum) {
         ) Writer.Error!void {
             switch (self.*) {
                 .noColor => {},
-                else => |mark| try mark.markOpen(writer, i),
+                inline else => |mark| try mark.markOpen(writer, i),
             }
         }
 
@@ -490,7 +490,7 @@ pub const Event = union(enum) {
         ) Writer.Error!void {
             switch (self.*) {
                 .noColor => {},
-                else => |mark| try mark.markClose(writer, i),
+                inline else => |mark| try mark.markClose(writer, i),
             }
         }
     };
@@ -513,7 +513,7 @@ pub const Event = union(enum) {
         return switch (c) {
             '\n' => "␊",
             // NOTE: this is a precomputed table
-            else => |preC| &.{preC},
+            inline else => |preC| &.{preC},
         };
     }
 };
@@ -723,7 +723,7 @@ pub const Sink = struct {
             writer: *std.Io.Writer,
         ) std.Io.Writer.Error!void {
             switch (self.*) {
-                else => try writer.print(".{s}", .{@tagName(self.*)}),
+                inline else => try writer.print(".{s}", .{@tagName(self.*)}),
             }
         }
     };
@@ -1225,7 +1225,7 @@ pub const MatchInLine = struct {
             => return .skipped,
             .emptyGroup,
             => {
-                return try MatchInLine.emptyMatch(
+                return try self.emptyMatch(
                     sink,
                     colorPicker,
                     event,
@@ -1375,7 +1375,7 @@ pub const MatchInLine = struct {
 
     // This consumed char at cursor, later
     // groupCursor is bumped to +1
-    pub fn emptyMatch(sink: *Sink, colorPicker: *ColorPicker, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
+    pub fn emptyMatch(self: anytype, sink: *Sink, colorPicker: *ColorPicker, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
         assert(event == .emptyGroup);
         const empty = event.emptyGroup;
 
@@ -1383,6 +1383,7 @@ pub const MatchInLine = struct {
         assert(group.start == group.end);
         const line = empty.base.line;
 
+        try self.showPrefixes(sink, colorPicker, empty.base.lineN);
         try writeClear(sink, colorPicker, &.{line[group.start]});
         return .consumed;
     }

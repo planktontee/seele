@@ -70,6 +70,9 @@ pub const MmapLineReader = struct {
         self.buffer = buffer;
         self.reader = .fixed(buffer);
         self.validateBin = validateBin;
+        // TODO: this is mutch faster than checking every line
+        // however for match counted and cases were we abruptly stop the match
+        // this will be really slow and we need a different behaviour based on those flags
         self.isInvalidFlag = if (validateBin) FileValidatorReader.isInvalid(self.buffer) else false;
     }
 

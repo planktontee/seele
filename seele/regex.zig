@@ -119,12 +119,9 @@ pub const Regex = struct {
         self: *const @This(),
         data: []const u8,
         offset: usize,
-        isLineStart: bool,
-        validateUtf8: bool,
     ) MatchError!RegexMatch {
         const flags: u32 = @bitCast(ExecutionFlags{
-            .notBol = !isLineStart,
-            .noUTFCheck = !validateUtf8,
+            .notBol = offset == 0,
         });
         const rc = c.pcre2_match_8(
             self.re,
@@ -277,7 +274,8 @@ pub const CompileFlags = packed struct(u32) {
     altBsux: bool = false,
     autoCallout: bool = false,
     caseless: bool = false,
-    dollarEndOnly: bool = true,
+    // NOTE: we dont have '\x00' terminates strings here
+    dollarEndOnly: bool = false,
     dotall: bool = false,
     dupnames: bool = false,
     extended: bool = false,
