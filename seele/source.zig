@@ -125,12 +125,6 @@ pub const MmapLineReader = struct {
             fDetailed.file.handle,
             0,
         );
-        _ = std.os.linux.fadvise(
-            fDetailed.file.handle,
-            0,
-            @bitCast(fDetailed.stat.size),
-            c.POSIX_FADV_SEQUENTIAL,
-        );
         return ptr;
     }
 };

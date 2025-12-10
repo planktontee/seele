@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const assert = std.debug.assert;
 const c = @import("c.zig").c;
 const Result = @import("regent").result.Result;
+const Context = @import("context.zig");
 
 pub const sink = @import("./sink.zig");
 
@@ -19,7 +20,7 @@ pub const RegexError = struct {
     err: CompileError,
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
-        if (builtin.mode == .Debug) return;
+        if (builtin.mode != .Debug) return;
         allocator.free(self.buff);
     }
 
@@ -28,7 +29,11 @@ pub const RegexError = struct {
     }
 };
 
-// TODO: add own memory allocators
+// NOTE:
+// I tried adding my own allocators and while it worked, it got significantly slower
+// I think it got slower because I had to encode size in the allocations and kinda shift
+// the pointers around. One thing I wanna try later is to preallocated from our stack a
+// bigger blob of memory for JIT to work with - afaik the default size is 32kb
 pub fn compile(
     allocator: std.mem.Allocator,
     pattern: []const u8,
@@ -37,7 +42,7 @@ pub fn compile(
     const compContext = c.pcre2_compile_context_create_8(null) orelse {
         return CompileError.RegexInitFailed;
     };
-    errdefer c.pcre2_compile_context_free_8(compContext);
+    defer if (builtin.mode == .Debug) c.pcre2_compile_context_free_8(compContext);
 
     switch (c.pcre2_set_newline_8(compContext, c.PCRE2_NEWLINE_LF)) {
         0 => {},
@@ -85,7 +90,6 @@ pub fn compile(
     return .{
         .Ok = .{
             .re = re,
-            .compContext = compContext,
             .matchData = matchData,
         },
     };
@@ -93,11 +97,10 @@ pub fn compile(
 
 pub const Regex = struct {
     re: *c.pcre2_code_8,
-    compContext: *c.pcre2_compile_context_8,
     matchData: *c.pcre2_match_data_8,
 
     pub fn deinit(self: *@This()) void {
-        if (builtin.mode == .Debug) return;
+        if (builtin.mode != .Debug) return;
         c.pcre2_match_data_free_8(self.matchData);
         self.matchData = undefined;
         c.pcre2_code_free_8(self.re);
@@ -121,7 +124,7 @@ pub const Regex = struct {
         offset: usize,
     ) MatchError!RegexMatch {
         const flags: u32 = @bitCast(ExecutionFlags{
-            .notBol = offset == 0,
+            .notBol = offset != 0,
         });
         const rc = c.pcre2_match_8(
             self.re,

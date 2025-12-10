@@ -8,6 +8,7 @@ const Allocator = std.mem.Allocator;
 const DebugAlloc = std.heap.DebugAllocator(.{
     .safety = true,
 });
+const sink = @import("sink.zig");
 
 scrapSize: ?usize,
 scrapAlloc: Allocator,
@@ -61,3 +62,6 @@ pub fn deinit(self: *@This()) void {
 }
 
 pub var instance: *@This() = undefined;
+
+pub var event: sink.Event = undefined;
+pub var baseEvent: sink.BaseEvent = undefined;

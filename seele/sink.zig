@@ -35,11 +35,9 @@ pub const EventHandler = union(enum) {
 
     pub fn handle(
         self: *@This(),
-        sink: *Sink,
-        event: Event,
     ) Sink.ConsumeError!Sink.ConsumeResponse {
         switch (self.*) {
-            inline else => |*handler| return try handler.handle(sink, event),
+            inline else => |*handler| return try handler.handle(),
         }
     }
 
@@ -85,11 +83,15 @@ pub const EventHandler = union(enum) {
     }
 };
 
-pub fn pickEventHandler(fDetailed: *const fs.DetailedFile, argsRes: *const args.ArgsRes) EventHandler {
+pub fn pickEventHandler(
+    fDetailed: *const fs.DetailedFile,
+    argsRes: *const args.ArgsRes,
+    sink: *Sink,
+) EventHandler {
     const showLines = argsRes.options.@"line-number";
 
     if (argsRes.options.@"invert-match") return .{
-        .nonMatchingLine = .init(showLines, .noColor),
+        .nonMatchingLine = .init(showLines, .noColor, sink),
     };
 
     switch (fDetailed.fileType) {
@@ -100,7 +102,13 @@ pub fn pickEventHandler(fDetailed: *const fs.DetailedFile, argsRes: *const args.
                 .noColor;
 
             if (argsRes.options.@"match-only") {
-                return .{ .matchOnly = .init(showLines, colorPattern) };
+                return .{
+                    .matchOnly = .init(
+                        showLines,
+                        colorPattern,
+                        sink,
+                    ),
+                };
             }
 
             if (argsRes.options.@"group-only") {
@@ -109,12 +117,25 @@ pub fn pickEventHandler(fDetailed: *const fs.DetailedFile, argsRes: *const args.
                         argsRes.options.@"group-delimiter",
                         showLines,
                         colorPattern,
+                        sink,
                     ),
                 };
             } else {
                 return switch (colorPattern) {
-                    .noColor => .{ .lineOnMatch = .init(showLines, colorPattern) },
-                    else => .{ .matchInLine = .init(showLines, colorPattern) },
+                    .noColor => .{
+                        .lineOnMatch = .init(
+                            showLines,
+                            colorPattern,
+                            sink,
+                        ),
+                    },
+                    else => .{
+                        .matchInLine = .init(
+                            showLines,
+                            colorPattern,
+                            sink,
+                        ),
+                    },
                 };
             }
         },
@@ -122,15 +143,28 @@ pub fn pickEventHandler(fDetailed: *const fs.DetailedFile, argsRes: *const args.
         .file,
         .pipe,
         => {
-            if (argsRes.options.@"match-only") return .{ .matchOnly = .init(showLines, .noColor) };
+            if (argsRes.options.@"match-only") return .{
+                .matchOnly = .init(
+                    showLines,
+                    .noColor,
+                    sink,
+                ),
+            };
             if (argsRes.options.@"group-only") return .{
                 .groupOnly = .init(
                     argsRes.options.@"group-delimiter",
                     showLines,
                     .noColor,
+                    sink,
                 ),
             };
-            return .{ .lineOnMatch = .init(showLines, .noColor) };
+            return .{
+                .lineOnMatch = .init(
+                    showLines,
+                    .noColor,
+                    sink,
+                ),
+            };
         },
     }
     unreachable;
@@ -200,7 +234,6 @@ pub const BaseEvent = struct {
 };
 
 pub const MatchEvent = struct {
-    base: *const BaseEvent,
     group: *const regex.RegexMatchGroup,
     hasMore: bool,
 
@@ -215,7 +248,7 @@ pub const MatchEvent = struct {
             self.group.end;
         try Event.formatSlice(
             writer,
-            self.base.line,
+            Context.baseEvent.line,
             Event.SliceFormatMode.init(.{
                 .start = self.group.start,
                 .end = end,
@@ -225,14 +258,13 @@ pub const MatchEvent = struct {
         try writer.print(" {f} .hasMore {any} .lineN {d} {c}", .{
             self.group.*,
             self.hasMore,
-            self.base.lineN,
+            Context.baseEvent.lineN,
             '}',
         });
     }
 };
 
 pub const SimpleMatchEvent = struct {
-    base: *const BaseEvent,
     group: *const regex.RegexMatchGroup,
 
     pub fn format(
@@ -246,7 +278,7 @@ pub const SimpleMatchEvent = struct {
             self.group.end;
         try Event.formatSlice(
             writer,
-            self.base.line,
+            Context.baseEvent.line,
             Event.SliceFormatMode.init(.{
                 .start = self.group.start,
                 .end = end,
@@ -255,14 +287,13 @@ pub const SimpleMatchEvent = struct {
 
         try writer.print(" {f} .lineN {d} {c}", .{
             self.group.*,
-            self.base.lineN,
+            Context.baseEvent.lineN,
             '}',
         });
     }
 };
 
 pub const BeforeGroup = struct {
-    base: *const BaseEvent,
     slice: []const u8,
     n: u16,
 
@@ -276,7 +307,7 @@ pub const BeforeGroup = struct {
             self.slice,
             .noColor,
         );
-        try writer.print(" .n {d} .lineN {d} {c}", .{ self.n, self.base.lineN, '}' });
+        try writer.print(" .n {d} .lineN {d} {c}", .{ self.n, Context.baseEvent.lineN, '}' });
     }
 };
 
@@ -302,7 +333,6 @@ pub const EndOfGroups = struct {
 };
 
 pub const SliceEvent = struct {
-    base: *const BaseEvent,
     slice: []const u8,
 
     pub fn format(
@@ -317,7 +347,7 @@ pub const SliceEvent = struct {
         );
 
         try writer.print(" .lineN {d} {c}", .{
-            self.base.lineN,
+            Context.baseEvent.lineN,
             '}',
         });
     }
@@ -616,16 +646,19 @@ pub const Sink = struct {
     colorEnabled: bool = false,
     sinkWriter: SinkWriter,
 
+    // TODO: send ptr here
     pub fn init(
+        self: *@This(),
         fDetailed: *const fs.DetailedFile,
         allocator: std.mem.Allocator,
         argsRes: *const args.ArgsRes,
-    ) SinkWriter.InitError!@This() {
+    ) SinkWriter.InitError!void {
         const eventHandler = pickEventHandler(
             fDetailed,
             argsRes,
+            self,
         );
-        return .{
+        self.* = .{
             .fileType = fDetailed.fileType,
             .eventHandler = eventHandler,
             .sinkWriter = try .init(
@@ -728,11 +761,12 @@ pub const Sink = struct {
         }
     };
 
-    pub fn consume(self: *@This(), comptime mode: Mode, event: Event) ConsumeError!ConsumeResponse {
+    pub fn consume(self: *@This(), comptime mode: Mode) ConsumeError!ConsumeResponse {
         if (comptime mode == .release) {
-            return self.innerConsume(event) catch |e| switch (e) {
+            return self.innerConsume() catch |e| switch (e) {
                 SinkWriteError.BadUTF8Encoding => {
-                    _ = try self.innerConsume(.eof);
+                    Context.event = .eof;
+                    _ = try self.innerConsume();
                     return e;
                 },
                 else => return e,
@@ -744,6 +778,7 @@ pub const Sink = struct {
         };
 
         var stderrW = Context.instance.stderrW;
+        const event = Context.event;
 
         try stderrW.writeAll(colorPicker.colorPattern.reset());
         try stderrW.writeAll("---\n");
@@ -752,7 +787,7 @@ pub const Sink = struct {
         // We need to ensure colors make sense always
         try stderrW.flush();
 
-        const result = self.innerConsume(event) catch |e| {
+        const result = self.innerConsume() catch |e| {
             try stderrW.writeAll(colorPicker.colorPattern.reset());
             try stderrW.print("Err┊ {s}\n", .{@errorName(e)});
 
@@ -776,8 +811,8 @@ pub const Sink = struct {
         return result;
     }
 
-    pub fn innerConsume(self: *@This(), event: Event) ConsumeError!ConsumeResponse {
-        return try self.eventHandler.handle(self, event);
+    pub fn innerConsume(self: *@This()) ConsumeError!ConsumeResponse {
+        return try self.eventHandler.handle();
     }
 };
 
@@ -788,14 +823,21 @@ pub const GroupOnly = struct {
     showLines: bool,
     fDetailed: ?*const fs.DetailedFile = null,
     lastLine: usize = 0,
+    sink: *Sink,
 
-    pub fn init(delimiter: u8, showLines: bool, pattern: tty.ColorPattern) @This() {
+    pub fn init(
+        delimiter: u8,
+        showLines: bool,
+        pattern: tty.ColorPattern,
+        sink: *Sink,
+    ) @This() {
         return .{
             .delimiter = switch (delimiter) {
                 inline else => |c| &.{c},
             },
             .showLines = showLines,
             .colorPicker = .init(pattern),
+            .sink = sink,
         };
     }
 
@@ -819,9 +861,8 @@ pub const GroupOnly = struct {
         };
     }
 
-    pub fn handle(self: *@This(), sink: *Sink, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
-        var colorPicker = &self.colorPicker;
-        switch (event) {
+    pub fn handle(self: *@This()) Sink.ConsumeError!Sink.ConsumeResponse {
+        switch (Context.event) {
             .afterMatch,
             .noMatch,
             .excludedGroup,
@@ -832,40 +873,30 @@ pub const GroupOnly = struct {
                 if (!emptyEvent.hasMore) return .skipped;
 
                 if (self.writeLine)
-                    try MatchOnly.showPrefixes(
-                        self,
-                        sink,
-                        colorPicker,
-                        emptyEvent.base.lineN,
-                    );
+                    try MatchOnly.showPrefixes(self);
 
-                var chunks = colorPicker.chunks(1, emptyEvent.group.n);
+                var chunks = self.colorPicker.chunks(1, emptyEvent.group.n);
                 chunks.clearChunk(self.delimiter);
-                try sink.writeVecAll(chunks.slices(), false);
+                try self.sink.writeVecAll(chunks.slices(), false);
 
                 return .consumed;
             },
             .groupMatch => |matchEvent| {
                 if (self.writeLine)
-                    try MatchOnly.showPrefixes(
-                        self,
-                        sink,
-                        colorPicker,
-                        matchEvent.base.lineN,
-                    );
+                    try MatchOnly.showPrefixes(self);
 
-                var chunks = colorPicker.chunks(
+                var chunks = self.colorPicker.chunks(
                     2,
                     matchEvent.group.n,
                 );
 
-                chunks.coloredChunk(matchEvent.group.slice(matchEvent.base.line));
+                chunks.coloredChunk(matchEvent.group.slice(Context.baseEvent.line));
                 if (matchEvent.hasMore)
                     chunks.clearChunk(self.delimiter)
                 else
                     chunks.breakline();
 
-                try sink.writeVecAll(chunks.slices(), true);
+                try self.sink.writeVecAll(chunks.slices(), true);
 
                 return .consumed;
             },
@@ -875,9 +906,9 @@ pub const GroupOnly = struct {
                 return .skipped;
             },
             .eol,
-            => return try MatchOnly.endLine(sink, event),
+            => return try MatchOnly.endLine(self),
             .eof,
-            => return try MatchInLine.endOfFile(sink, colorPicker, event),
+            => return try MatchInLine.endOfFile(self),
         }
     }
 };
@@ -888,11 +919,17 @@ pub const MatchOnly = struct {
     fDetailed: ?*const fs.DetailedFile = null,
     writeLine: bool = true,
     lastLine: usize = 0,
+    sink: *Sink,
 
-    pub fn init(showLines: bool, pattern: tty.ColorPattern) @This() {
+    pub fn init(
+        showLines: bool,
+        pattern: tty.ColorPattern,
+        sink: *Sink,
+    ) @This() {
         return .{
             .showLines = showLines,
             .colorPicker = .init(pattern),
+            .sink = sink,
         };
     }
 
@@ -915,10 +952,8 @@ pub const MatchOnly = struct {
         };
     }
 
-    pub fn handle(self: *@This(), sink: *Sink, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
-        var colorPicker = &self.colorPicker;
-        _ = &colorPicker;
-        return switch (event) {
+    pub fn handle(self: *@This()) Sink.ConsumeError!Sink.ConsumeResponse {
+        return switch (Context.event) {
             .afterMatch,
             .noMatch,
             .emptyGroup,
@@ -928,12 +963,11 @@ pub const MatchOnly = struct {
                 if (excluded.group.n == 0 and excluded.hasMore) return .cropLine;
 
                 if (self.writeLine)
-                    try self.showPrefixes(sink, colorPicker, excluded.base.lineN);
+                    try self.showPrefixes();
 
                 try MatchInLine.writeClear(
-                    sink,
-                    colorPicker,
-                    excluded.group.slice(excluded.base.line),
+                    self,
+                    excluded.group.slice(Context.baseEvent.line),
                 );
                 return .consumed;
             },
@@ -942,11 +976,10 @@ pub const MatchOnly = struct {
                 if (before.n == 0) return .skipped;
 
                 if (self.writeLine)
-                    try self.showPrefixes(sink, colorPicker, before.base.lineN);
+                    try self.showPrefixes();
 
                 try MatchInLine.writeClear(
-                    sink,
-                    colorPicker,
+                    self,
                     before.slice,
                 );
                 return .consumed;
@@ -954,76 +987,63 @@ pub const MatchOnly = struct {
             .endOfGroups,
             => {
                 self.writeLine = true;
-                return try endOfGroupBreakline(
-                    sink,
-                    colorPicker,
-                    event,
-                );
+                return try self.endOfGroupBreakline();
             },
             .groupMatch,
             => |match| {
                 if (self.writeLine or match.group.n == 0)
-                    try self.showPrefixes(sink, colorPicker, match.base.lineN);
+                    try self.showPrefixes();
 
                 try MatchInLine.writeColored(
-                    sink,
-                    colorPicker,
-                    match.group.slice(match.base.line),
+                    self,
+                    match.group.slice(Context.baseEvent.line),
                     match.group.n,
                 );
                 return .consumed;
             },
             .eol,
-            => return try endLine(sink, event),
+            => return try self.endLine(),
             .eof,
-            => return try MatchInLine.endOfFile(sink, colorPicker, event),
+            => return try MatchInLine.endOfFile(self),
         };
     }
 
     // BUG: because this is split from line validation, we may write this and skip
     // writing the actual data, resulting in an empty line
-    pub fn showPrefixes(self: anytype, sink: *Sink, colorPicker: *ColorPicker, lineN: usize) Sink.ConsumeError!void {
+    pub fn showPrefixes(self: anytype) Sink.ConsumeError!void {
         self.lastLine = 0;
-        try MatchInLine.showPrefixes(
-            self,
-            sink,
-            colorPicker,
-            lineN,
-        );
+        try MatchInLine.showPrefixes(self);
         self.writeLine = false;
     }
 
-    pub fn endOfGroupBreakline(sink: *Sink, colorPicker: *ColorPicker, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
-        assert(event == .endOfGroups);
-        const endOfGroups = event.endOfGroups;
+    pub fn endOfGroupBreakline(self: anytype) Sink.ConsumeError!Sink.ConsumeResponse {
+        assert(Context.event == .endOfGroups);
+        const endOfGroups = Context.event.endOfGroups;
 
         if (endOfGroups.group0Empty) return .skipped;
         if (endOfGroups.hadBreakline) return .skipped;
 
         if (endOfGroups.sliceOpt) |slice| {
-            var chunks = colorPicker.chunks(2, 0);
+            var chunks = self.colorPicker.chunks(2, 0);
             chunks.clearChunk(slice);
             if (slice[slice.len - 1] == '\n')
                 chunks.skipChunk()
             else
                 chunks.breakline();
-            try sink.writeVecAll(chunks.slices(), true);
+            try self.sink.writeVecAll(chunks.slices(), true);
             return .consumed;
         }
 
-        try MatchInLine.breakline(
-            sink,
-            colorPicker,
-        );
+        try MatchInLine.breakline(self);
         return .consumed;
     }
 
-    pub fn endLine(sink: *Sink, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
-        assert(event == .eol);
-        const eolEvent = event.eol;
+    pub fn endLine(self: anytype) Sink.ConsumeError!Sink.ConsumeResponse {
+        assert(Context.event == .eol);
+        const eolEvent = Context.event.eol;
 
         if (eolEvent.hadMatches) {
-            try sink.sinkLine();
+            try self.sink.sinkLine();
             return .consumed;
         } else return .skipped;
     }
@@ -1034,11 +1054,17 @@ pub const NonMatchingLine = struct {
     showLines: bool,
     fDetailed: ?*const fs.DetailedFile = null,
     lastLine: usize = 0,
+    sink: *Sink,
 
-    pub fn init(showLines: bool, pattern: tty.ColorPattern) @This() {
+    pub fn init(
+        showLines: bool,
+        pattern: tty.ColorPattern,
+        sink: *Sink,
+    ) @This() {
         return .{
             .showLines = showLines,
             .colorPicker = .init(pattern),
+            .sink = sink,
         };
     }
 
@@ -1056,10 +1082,8 @@ pub const NonMatchingLine = struct {
         };
     }
 
-    pub fn handle(self: *@This(), sink: *Sink, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
-        var colorPicker = &self.colorPicker;
-        _ = &colorPicker;
-        switch (event) {
+    pub fn handle(self: *@This()) Sink.ConsumeError!Sink.ConsumeResponse {
+        switch (Context.event) {
             .emptyGroup,
             .excludedGroup,
             .beforeGroup,
@@ -1067,37 +1091,23 @@ pub const NonMatchingLine = struct {
             .afterMatch,
             .endOfGroups,
             => return .consumedLine,
-            .noMatch => |lineEvent| return LineOnMatch.consumeLine(
-                self,
-                sink,
-                colorPicker,
-                lineEvent.slice,
-                lineEvent.base.lineN,
-            ),
-            .eol => return try NonMatchingLine.endOfLine(
-                sink,
-                colorPicker,
-                event,
-            ),
-            .eof => return try MatchInLine.endOfFile(
-                sink,
-                colorPicker,
-                event,
-            ),
+            .noMatch => return LineOnMatch.consumeLine(self),
+            .eol => return try NonMatchingLine.endOfLine(self),
+            .eof => return try MatchInLine.endOfFile(self),
         }
     }
 
-    pub fn endOfLine(sink: *Sink, colorPicker: *ColorPicker, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
-        assert(event == .eol);
-        const eolEvent = event.eol;
+    pub fn endOfLine(self: anytype) Sink.ConsumeError!Sink.ConsumeResponse {
+        assert(Context.event == .eol);
+        const eolEvent = Context.event.eol;
 
         if (!eolEvent.hadMatches) {
             // Line has no breakline
             if (eolEvent.charOpt) |char| {
                 assert(char == '\n');
-                try MatchInLine.breakline(sink, colorPicker);
+                try MatchInLine.breakline(self);
             }
-            try sink.sinkLine();
+            try self.sink.sinkLine();
             return .consumed;
         } else return .skipped;
     }
@@ -1108,11 +1118,17 @@ pub const LineOnMatch = struct {
     showLines: bool,
     fDetailed: ?*const fs.DetailedFile = null,
     lastLine: usize = 0,
+    sink: *Sink,
 
-    pub fn init(showLines: bool, pattern: tty.ColorPattern) @This() {
+    pub fn init(
+        showLines: bool,
+        pattern: tty.ColorPattern,
+        sink: *Sink,
+    ) @This() {
         return .{
             .showLines = showLines,
             .colorPicker = .init(pattern),
+            .sink = sink,
         };
     }
 
@@ -1135,10 +1151,8 @@ pub const LineOnMatch = struct {
         };
     }
 
-    pub fn handle(self: *@This(), sink: *Sink, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
-        var colorPicker = &self.colorPicker;
-        _ = &colorPicker;
-        switch (event) {
+    pub fn handle(self: *@This()) Sink.ConsumeError!Sink.ConsumeResponse {
+        switch (Context.event) {
             .beforeGroup,
             .afterMatch,
             .noMatch,
@@ -1146,42 +1160,18 @@ pub const LineOnMatch = struct {
             => return .skipped,
             .emptyGroup,
             .groupMatch,
-            => |emptyMatch| return try self.consumeLine(
-                sink,
-                colorPicker,
-                emptyMatch.base.line,
-                emptyMatch.base.lineN,
-            ),
+            => return try self.consumeLine(),
             // All groups regardless of exclusion should cause line to be consumed
             .excludedGroup,
-            => |matchEvent| return try self.consumeLine(
-                sink,
-                colorPicker,
-                matchEvent.base.line,
-                matchEvent.base.lineN,
-            ),
-            .eol => return try MatchInLine.endOfLine(
-                sink,
-                colorPicker,
-                event,
-            ),
-            .eof => return try MatchInLine.endOfFile(
-                sink,
-                colorPicker,
-                event,
-            ),
+            => return try self.consumeLine(),
+            .eol => return try MatchInLine.endOfLine(self),
+            .eof => return try MatchInLine.endOfFile(self),
         }
     }
 
-    pub fn consumeLine(
-        self: anytype,
-        sink: *Sink,
-        colorPicker: *ColorPicker,
-        slice: []const u8,
-        lineN: usize,
-    ) Sink.ConsumeError!Sink.ConsumeResponse {
-        try MatchInLine.showPrefixes(self, sink, colorPicker, lineN);
-        try MatchInLine.writeClear(sink, colorPicker, slice);
+    pub fn consumeLine(self: anytype) Sink.ConsumeError!Sink.ConsumeResponse {
+        try MatchInLine.showPrefixes(self);
+        try MatchInLine.writeClear(self, Context.baseEvent.line);
         return .consumedLine;
     }
 };
@@ -1191,11 +1181,17 @@ pub const MatchInLine = struct {
     showLines: bool,
     fDetailed: ?*const fs.DetailedFile = null,
     lastLine: usize = 0,
+    sink: *Sink,
 
-    pub fn init(showLines: bool, pattern: tty.ColorPattern) @This() {
+    pub fn init(
+        showLines: bool,
+        pattern: tty.ColorPattern,
+        sink: *Sink,
+    ) @This() {
         return .{
             .showLines = showLines,
             .colorPicker = .init(pattern),
+            .sink = sink,
         };
     }
 
@@ -1216,194 +1212,171 @@ pub const MatchInLine = struct {
         };
     }
 
-    pub fn handle(self: *@This(), sink: *Sink, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
-        var colorPicker = &self.colorPicker;
-        _ = &colorPicker;
-        switch (event) {
+    pub fn handle(self: *@This()) Sink.ConsumeError!Sink.ConsumeResponse {
+        switch (Context.event) {
             .excludedGroup,
             .noMatch,
             => return .skipped,
             .emptyGroup,
-            => {
-                return try self.emptyMatch(
-                    sink,
-                    colorPicker,
-                    event,
-                );
-            },
+            => return try self.emptyMatch(),
             .beforeGroup,
-            => return try self.beforeGroup(
-                sink,
-                colorPicker,
-                event,
-            ),
+            => return try self.beforeGroup(),
             .groupMatch,
-            => return try self.groupMatch(
-                sink,
-                colorPicker,
-                event,
-            ),
+            => return try self.groupMatch(),
             .afterMatch,
-            => return try MatchInLine.afterMatch(
-                sink,
-                colorPicker,
-                event,
-            ),
+            => return try self.afterMatch(),
             .endOfGroups,
-            => return try self.consumeEndOfGroups(sink, colorPicker, event),
+            => return try self.consumeEndOfGroups(),
             .eol,
-            => return try MatchInLine.endOfLine(
-                sink,
-                colorPicker,
-                event,
-            ),
+            => return try self.endOfLine(),
             .eof,
-            => return try MatchInLine.endOfFile(
-                sink,
-                colorPicker,
-                event,
-            ),
+            => return try self.endOfFile(),
         }
     }
 
-    pub fn consumeEndOfGroups(_: anytype, sink: *Sink, colorPicker: *ColorPicker, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
-        assert(event == .endOfGroups);
-        const endOfGroups = event.endOfGroups;
+    pub fn consumeEndOfGroups(self: anytype) Sink.ConsumeError!Sink.ConsumeResponse {
+        assert(Context.event == .endOfGroups);
+        const endOfGroups = Context.event.endOfGroups;
 
         if (endOfGroups.group0Empty) return .skipped;
         if (endOfGroups.hadBreakline) return .skipped;
 
         if (endOfGroups.sliceOpt) |slice| {
-            var chunks = colorPicker.chunks(1, 0);
+            var chunks = self.colorPicker.chunks(1, 0);
             chunks.clearChunk(slice);
-            try sink.writeVecAll(chunks.slices(), true);
+            try self.sink.writeVecAll(chunks.slices(), true);
             return .consumed;
         }
 
         return .skipped;
     }
 
-    pub fn groupMatch(self: anytype, sink: *Sink, colorPicker: *ColorPicker, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
-        assert(event == .groupMatch);
-        const matchEvent = event.groupMatch;
+    pub fn groupMatch(self: anytype) Sink.ConsumeError!Sink.ConsumeResponse {
+        assert(Context.event == .groupMatch);
+        const matchEvent = Context.event.groupMatch;
 
-        try self.showPrefixes(sink, colorPicker, matchEvent.base.lineN);
-        try writeColored(
-            sink,
-            colorPicker,
-            matchEvent.group.slice(matchEvent.base.line),
+        try self.showPrefixes();
+        try self.writeColored(
+            matchEvent.group.slice(Context.baseEvent.line),
             matchEvent.group.n,
         );
         return .consumed;
     }
 
-    pub fn beforeGroup(self: anytype, sink: *Sink, colorPicker: *ColorPicker, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
-        assert(event == .beforeGroup);
-        const beforeGroupEvent = event.beforeGroup;
+    pub fn beforeGroup(self: anytype) Sink.ConsumeError!Sink.ConsumeResponse {
+        assert(Context.event == .beforeGroup);
+        const beforeGroupEvent = Context.event.beforeGroup;
         const slice = beforeGroupEvent.slice;
 
-        try self.showPrefixes(sink, colorPicker, beforeGroupEvent.base.lineN);
-        try writeClear(sink, colorPicker, slice);
+        try self.showPrefixes();
+        try self.writeClear(slice);
 
         return .consumed;
     }
 
-    pub fn showPrefixes(self: anytype, sink: *Sink, colorPicker: *ColorPicker, lineN: usize) Sink.ConsumeError!void {
+    pub fn showPrefixes(self: anytype) Sink.ConsumeError!void {
         // NOTE: this is fine because we move away from direct io in case showLines is used
+        const lineN = Context.baseEvent.lineN;
         if (self.lastLine != lineN) {
             if (self.fDetailed) |fDetailed| {
-                var chunks = colorPicker.chunks(4, 0);
+                var chunks = self.colorPicker.chunks(4, 0);
                 chunks.forceColoredChunk(
                     tty.EscapeColor.magenta.escapeCode(),
                     fDetailed.path[0],
                 );
                 chunks.forceChunk(fDetailed.path[1]);
                 chunks.forceChunk(fDetailed.path[2]);
-                chunks.forceColoredChunk(tty.EscapeColor.reset.escapeCode(), self.prefixDelimiter());
-                _ = colorPicker.reset();
+                chunks.forceColoredChunk(
+                    tty.EscapeColor.reset.escapeCode(),
+                    self.prefixDelimiter(),
+                );
+                _ = self.colorPicker.reset();
 
-                try sink.writeVecAll(chunks.slices(), false);
+                try self.sink.writeVecAll(chunks.slices(), false);
                 self.lastLine = lineN;
             }
 
             if (self.showLines) {
-                var chunks = colorPicker.chunks(2, 0);
+                var chunks = self.colorPicker.chunks(2, 0);
                 const buffLen = comptime std.fmt.count("{d}", .{std.math.maxInt(usize)});
                 var buff: [buffLen]u8 = undefined;
                 const lineNStr = try std.fmt.bufPrint(&buff, "{d}", .{lineN});
                 chunks.forceColoredChunk(tty.EscapeColor.green.escapeCode(), lineNStr);
-                chunks.forceColoredChunk(tty.EscapeColor.reset.escapeCode(), self.prefixDelimiter());
-                _ = colorPicker.reset();
+                chunks.forceColoredChunk(
+                    tty.EscapeColor.reset.escapeCode(),
+                    self.prefixDelimiter(),
+                );
+                _ = self.colorPicker.reset();
 
-                try sink.writeVecAll(chunks.slices(), false);
+                try self.sink.writeVecAll(chunks.slices(), false);
                 self.lastLine = lineN;
             }
         }
     }
 
-    pub fn endOfFile(sink: *Sink, colorPicker: *ColorPicker, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
-        assert(event == .eof);
+    pub fn endOfFile(self: anytype) Sink.ConsumeError!Sink.ConsumeResponse {
+        assert(Context.event == .eof);
 
-        var buff: [1][]const u8 = .{colorPicker.reset()};
-        try sink.writeVecAll(&buff, false);
-        try sink.sink();
+        var buff: [1][]const u8 = .{self.colorPicker.reset()};
+        try self.sink.writeVecAll(&buff, false);
+        try self.sink.sink();
         return .consumed;
     }
 
-    pub fn endOfLine(sink: *Sink, colorPicker: *ColorPicker, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
-        assert(event == .eol);
-        const eolEvent = event.eol;
+    pub fn endOfLine(self: anytype) Sink.ConsumeError!Sink.ConsumeResponse {
+        assert(Context.event == .eol);
+        const eolEvent = Context.event.eol;
 
         if (eolEvent.hadMatches) {
             // Line has no breakline
             if (eolEvent.charOpt) |char| {
                 assert(char == '\n');
-                try breakline(sink, colorPicker);
+                try MatchInLine.breakline(self);
             }
-            try sink.sinkLine();
+            try self.sink.sinkLine();
             return .consumed;
         } else return .skipped;
     }
 
-    pub fn afterMatch(sink: *Sink, colorPicker: *ColorPicker, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
-        assert(event == .afterMatch);
-        const lineEvent = event.afterMatch;
+    pub fn afterMatch(self: anytype) Sink.ConsumeError!Sink.ConsumeResponse {
+        assert(Context.event == .afterMatch);
+        const lineEvent = Context.event.afterMatch;
 
-        try writeClear(sink, colorPicker, lineEvent.slice);
+        try self.writeClear(lineEvent.slice);
         return .consumed;
     }
 
     // This consumed char at cursor, later
     // groupCursor is bumped to +1
-    pub fn emptyMatch(self: anytype, sink: *Sink, colorPicker: *ColorPicker, event: Event) Sink.ConsumeError!Sink.ConsumeResponse {
-        assert(event == .emptyGroup);
-        const empty = event.emptyGroup;
+    pub fn emptyMatch(self: anytype) Sink.ConsumeError!Sink.ConsumeResponse {
+        assert(Context.event == .emptyGroup);
+        const empty = Context.event.emptyGroup;
 
         const group = empty.group;
         assert(group.start == group.end);
-        const line = empty.base.line;
+        const line = Context.baseEvent.line;
 
-        try self.showPrefixes(sink, colorPicker, empty.base.lineN);
-        try writeClear(sink, colorPicker, &.{line[group.start]});
+        try self.showPrefixes();
+        try self.writeClear(&.{line[group.start]});
         return .consumed;
     }
 
-    pub fn writeColored(sink: *Sink, colorPicker: *ColorPicker, slice: []const u8, offset: u16) Sink.ConsumeError!void {
-        var chunks = colorPicker.chunks(1, offset);
+    pub fn writeColored(self: anytype, slice: []const u8, offset: u16) Sink.ConsumeError!void {
+        var chunks = self.colorPicker.chunks(1, offset);
         chunks.coloredChunk(slice);
-        try sink.writeVecAll(chunks.slices(), true);
+        try self.sink.writeVecAll(chunks.slices(), true);
     }
 
-    pub fn breakline(sink: *Sink, colorPicker: *ColorPicker) Sink.ConsumeError!void {
-        var chunks = colorPicker.chunks(1, 0);
+    pub fn breakline(self: anytype) Sink.ConsumeError!void {
+        var chunks = self.colorPicker.chunks(1, 0);
         chunks.breakline();
-        try sink.writeVecAll(chunks.slices(), false);
+        try self.sink.writeVecAll(chunks.slices(), false);
     }
 
-    pub fn writeClear(sink: *Sink, colorPicker: *ColorPicker, slice: []const u8) Sink.ConsumeError!void {
-        var chunks = colorPicker.chunks(1, 0);
+    pub fn writeClear(self: anytype, slice: []const u8) Sink.ConsumeError!void {
+        var chunks = self.colorPicker.chunks(1, 0);
         chunks.clearChunk(slice);
-        try sink.writeVecAll(chunks.slices(), true);
+        try self.sink.writeVecAll(chunks.slices(), true);
     }
 };
 

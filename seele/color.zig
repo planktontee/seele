@@ -7,7 +7,7 @@ pub const ColorPicker = struct {
     colorPattern: tty.ColorPattern = .escape,
     trueColor: bool,
     state: State = .reset,
-    chunksBuff: [20][]const u8 = undefined,
+    chunksBuff: [16][]const u8 = undefined,
 
     pub const State = union(enum) {
         reset,

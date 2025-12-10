@@ -200,7 +200,7 @@ const MatchData = struct {
         self.matchCount = 0;
     }
 
-    pub fn isDone(self: @This()) bool {
+    pub fn isDone(self: *const @This()) bool {
         return self.max == self.matchCount;
     }
 };
@@ -257,7 +257,8 @@ pub fn run(comptime mode: sink.Mode, argsRes: *const args.ArgsRes) RunError!RunR
         "(stdout)",
         &(try stdoutFd.stat()),
     );
-    var fSink = try sink.Sink.init(
+    var fSink: sink.Sink = undefined;
+    try fSink.init(
         &stdout,
         Context.instance.outAlloc,
         argsRes,
@@ -327,7 +328,7 @@ pub fn matchFile(
 
     var lineCursor: LineMatchCursor = undefined;
     var groupCursor: GroupMatchCursor = undefined;
-    var base: sink.BaseEvent = .{
+    Context.baseEvent = .{
         .line = undefined,
         .lineN = matchData.lineN,
         .fDetailed = fSource.fDetailed,
@@ -337,7 +338,8 @@ pub fn matchFile(
         const readEvent = try fSource.nextLine();
         fileState: switch (readEvent) {
             .eof => {
-                _ = try fSink.consume(mode, .eof);
+                Context.event = .eof;
+                _ = try fSink.consume(mode);
                 break :fileLoop;
             },
             .eofChunk,
@@ -347,8 +349,8 @@ pub fn matchFile(
                 if (fSource.isInvalid())
                     continue :fileState .eof;
 
-                base.line = line;
-                base.lineN += 1;
+                Context.baseEvent.line = line;
+                Context.baseEvent.lineN += 1;
                 matchData.lineN += 1;
                 lineCursor.init(line);
 
@@ -361,12 +363,13 @@ pub fn matchFile(
                                 if (lastChar != '\n') charOpt = '\n';
                             }
 
-                            _ = try fSink.consume(mode, .{
+                            Context.event = .{
                                 .eol = .{
                                     .charOpt = charOpt,
                                     .hadMatches = lineCursor.hadMatches,
                                 },
-                            });
+                            };
+                            _ = try fSink.consume(mode);
                         }
                         continue :fileState .eof;
                     }
@@ -383,21 +386,23 @@ pub fn matchFile(
                         regex.Regex.MatchError.BadUTF8Encode => continue :fileState .eof,
                         regex.Regex.MatchError.NoMatch => {
                             if (lineCursor.hadMatches) {
-                                if (!fSink.eventHandler.skips(.afterMatch))
-                                    _ = try fSink.consume(mode, .{
+                                if (!fSink.eventHandler.skips(.afterMatch)) {
+                                    Context.event = .{
                                         .afterMatch = &.{
                                             .slice = lineCursor.reminder(),
-                                            .base = &base,
                                         },
-                                    });
+                                    };
+                                    _ = try fSink.consume(mode);
+                                }
                             } else {
-                                if (!fSink.eventHandler.skips(.noMatch))
-                                    _ = try fSink.consume(mode, .{
+                                if (!fSink.eventHandler.skips(.noMatch)) {
+                                    Context.event = .{
                                         .noMatch = &.{
                                             .slice = lineCursor.reminder(),
-                                            .base = &base,
                                         },
-                                    });
+                                    };
+                                    _ = try fSink.consume(mode);
+                                }
                             }
                             lineCursor.finish();
                             continue :lineLoop;
@@ -425,13 +430,13 @@ pub fn matchFile(
 
                         if (!fSink.eventHandler.skips(.beforeGroup))
                             if (groupCursor.beforeMatch()) |slice| {
-                                const res = try fSink.consume(mode, .{
+                                Context.event = .{
                                     .beforeGroup = &.{
-                                        .base = &base,
                                         .slice = slice,
                                         .n = group.n,
                                     },
-                                });
+                                };
+                                const res = try fSink.consume(mode);
                                 switch (res) {
                                     .consumed => {
                                         groupCursor.moveTo(group.start);
@@ -450,13 +455,13 @@ pub fn matchFile(
                                 continue :groupLoop;
                             }
 
-                            const res = try fSink.consume(mode, .{
+                            Context.event = .{
                                 .excludedGroup = &.{
-                                    .base = &base,
                                     .group = group,
                                     .hasMore = groupCursor.hasMoreGroups(),
                                 },
-                            });
+                            };
+                            const res = try fSink.consume(mode);
                             switch (res) {
                                 .cropLine,
                                 => {
@@ -486,23 +491,23 @@ pub fn matchFile(
                         const res: sink.Sink.ConsumeResponse = if (groupCursor.isEmptyGroup()) rv: {
                             if (fSink.eventHandler.skips(.emptyGroup)) break :rv .skipped;
 
-                            break :rv try fSink.consume(mode, .{
+                            Context.event = .{
                                 .emptyGroup = &.{
-                                    .base = &base,
                                     .group = group,
                                     .hasMore = groupCursor.hasMoreGroups(),
                                 },
-                            });
+                            };
+                            break :rv try fSink.consume(mode);
                         } else rv: {
                             if (fSink.eventHandler.skips(.groupMatch)) break :rv .skipped;
 
-                            break :rv try fSink.consume(mode, .{
+                            Context.event = .{
                                 .groupMatch = &.{
-                                    .base = &base,
                                     .group = group,
                                     .hasMore = groupCursor.hasMoreGroups(),
                                 },
-                            });
+                            };
+                            break :rv try fSink.consume(mode);
                         };
                         switch (res) {
                             .consumedLine => {
@@ -530,14 +535,15 @@ pub fn matchFile(
 
                     const reminderOpt = groupCursor.reminder();
                     if (!fSink.eventHandler.skips(.endOfGroups)) {
-                        _ = try fSink.consume(mode, .{
+                        Context.event = .{
                             .endOfGroups = .{
                                 .sliceOpt = reminderOpt,
                                 // we are always +1
                                 .hadBreakline = groupCursor.backtrack() == '\n',
                                 .group0Empty = groupCursor.isGroup0Empty(),
                             },
-                        });
+                        };
+                        _ = try fSink.consume(mode);
                     }
                     if (reminderOpt != null)
                         groupCursor.finishGroup0();
@@ -545,16 +551,18 @@ pub fn matchFile(
                     lineCursor.forwardTo(groupCursor.lineToken);
                 }
 
-                _ = try fSink.consume(mode, .{
+                Context.event = .{
                     .eol = .{
                         .charOpt = if (!lineCursor.hasBreakline()) '\n' else null,
                         .hadMatches = lineCursor.hadMatches,
                     },
-                });
+                };
+                _ = try fSink.consume(mode);
 
                 // NOTE: this avoids one extra syscall for read
                 if (readEvent == .eofChunk) {
-                    _ = try fSink.consume(mode, .eof);
+                    Context.event = .eof;
+                    _ = try fSink.consume(mode);
 
                     break :fileLoop;
                 }
