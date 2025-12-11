@@ -9,6 +9,7 @@ const DebugAlloc = std.heap.DebugAllocator(.{
     .safety = true,
 });
 const sink = @import("sink.zig");
+const ArgsRes = @import("args.zig").ArgsRes;
 
 scrapSize: ?usize,
 scrapAlloc: Allocator,
@@ -56,12 +57,33 @@ pub fn deinit(self: *@This()) void {
         const inDba: *DebugAlloc = @ptrCast(@alignCast(self.inAlloc.ptr));
         const outDba: *DebugAlloc = @ptrCast(@alignCast(self.outAlloc.ptr));
         if (scrapDba.deinit() == .leak) @panic("Scrap memory leaked!");
-        if (inDba.deinit() == .leak) @panic("Input memory leaked!");
-        if (outDba.deinit() == .leak) @panic("Output memory leaked!");
+        if (usingStack == true) {
+            if (inDba.deinit() == .leak) @panic("Input memory leaked!");
+            if (outDba.deinit() == .leak) @panic("Output memory leaked!");
+        }
     }
 }
+
+pub var usingStack: bool = false;
 
 pub var instance: *@This() = undefined;
 
 pub var event: sink.Event = undefined;
 pub var baseEvent: sink.BaseEvent = undefined;
+
+pub var chunksBuff: [32][]const u8 = undefined;
+pub var slices: [][]const u8 = undefined;
+pub var buffAt: usize = 0;
+pub var lineNBuff: [std.fmt.count("{d}", .{std.math.maxInt(usize)})]u8 = undefined;
+
+pub fn slice(size: usize) void {
+    @This().slices = @This().chunksBuff[@This().buffAt .. @This().buffAt + size];
+}
+
+pub fn getSlices() [][]const u8 {
+    return @This().chunksBuff[0 .. @This().buffAt + @This().slices.len];
+}
+
+pub var sinkp: sink.Sink = undefined;
+
+pub var argsRes: *const ArgsRes = undefined;

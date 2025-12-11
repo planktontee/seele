@@ -25,6 +25,7 @@ pub fn main() !u8 {
     const TargetMaxT = u6;
 
     if (currMb <= std.math.maxInt(TargetMaxT) and currMb > 5) {
+        Context.usingStack = true;
         switch (@as(u6, @intCast(currMb))) {
             0...5 => unreachable,
             inline else => |targetMb| {
@@ -162,7 +163,6 @@ pub const RunError = error{
     BadInputFile,
     UnsupportedMatchMode,
 } ||
-    args.Args.TargetGroupError ||
     regex.CompileError ||
     regex.Regex.MatchError ||
     regex.RegexMatch.GroupError ||
@@ -173,30 +173,23 @@ pub const RunError = error{
     source.ReadEvent.Error ||
     sink.Sink.ConsumeError ||
     std.Io.Reader.DelimiterError ||
-    GroupMatchCursor.InitErr ||
+    GroupMatchCursor.LoadGroupError ||
     std.Io.Writer.Error;
 
 const MatchData = struct {
     matchCount: usize,
-    lineN: usize,
     max: usize,
-    fDetailed: *const fs.DetailedFile,
 
     pub fn init(
         max: usize,
-        fDetailed: *const fs.DetailedFile,
     ) @This() {
         return .{
             .matchCount = 0,
-            .lineN = 0,
             .max = max,
-            .fDetailed = fDetailed,
         };
     }
 
-    pub fn restart(self: *@This(), fDetailed: *const fs.DetailedFile) void {
-        self.fDetailed = fDetailed;
-        self.lineN = 0;
+    pub fn restart(self: *@This()) void {
         self.matchCount = 0;
     }
 
@@ -257,13 +250,13 @@ pub fn run(comptime mode: sink.Mode, argsRes: *const args.ArgsRes) RunError!RunR
         "(stdout)",
         &(try stdoutFd.stat()),
     );
-    var fSink: sink.Sink = undefined;
-    try fSink.init(
+
+    try Context.sinkp.init(
         &stdout,
         Context.instance.outAlloc,
         argsRes,
     );
-    defer fSink.deinit(Context.instance.outAlloc);
+    defer Context.sinkp.deinit(Context.instance.outAlloc);
 
     var matchData: MatchData = undefined;
     var hadMatches = false;
@@ -279,16 +272,13 @@ pub fn run(comptime mode: sink.Mode, argsRes: *const args.ArgsRes) RunError!RunR
                 argsRes.options.@"skip-binary",
             );
             firstMissing = false;
-            matchData = .init(
-                argsRes.options.@"match-max",
-                &input,
-            );
+            matchData = .init(argsRes.options.@"match-max");
             if (showFileName and !argsRes.options.@"no-file-name")
-                fSink.eventHandler.showFileName(&input);
+                Context.sinkp.eventHandler.showFileName(&input);
         } else {
             try fSource.loadSource(&input);
-            matchData.restart(&input);
-            fSink.eventHandler.restart();
+            matchData.restart();
+            Context.sinkp.eventHandler.restart();
         }
 
         matchFile(
@@ -296,7 +286,6 @@ pub fn run(comptime mode: sink.Mode, argsRes: *const args.ArgsRes) RunError!RunR
             argsRes,
             rgx,
             &fSource,
-            &fSink,
             &matchData,
         ) catch |e| switch (e) {
             sink.Sink.SinkWriteError.BadUTF8Encoding => {},
@@ -316,7 +305,6 @@ pub fn matchFile(
     argsRes: *const args.ArgsRes,
     rgx: regex.Regex,
     fSource: *source.Source,
-    fSink: *sink.Sink,
     matchData: *MatchData,
 ) !void {
     // TODO:
@@ -326,11 +314,14 @@ pub fn matchFile(
     // check for \K
     // \K handling needs partial and other types of handling for anchoring
 
+    Context.argsRes = argsRes;
+
+    const fSink = &Context.sinkp;
     var lineCursor: LineMatchCursor = undefined;
     var groupCursor: GroupMatchCursor = undefined;
     Context.baseEvent = .{
         .line = undefined,
-        .lineN = matchData.lineN,
+        .lineN = 0,
         .fDetailed = fSource.fDetailed,
     };
 
@@ -345,18 +336,17 @@ pub fn matchFile(
             .eofChunk,
             .line,
             => |line| {
-                // // TODO: make bin check optional
                 if (fSource.isInvalid())
                     continue :fileState .eof;
 
                 Context.baseEvent.line = line;
                 Context.baseEvent.lineN += 1;
-                matchData.lineN += 1;
-                lineCursor.init(line);
+                lineCursor.init();
 
                 lineLoop: while (lineCursor.hasReminder()) {
                     if (matchData.isDone()) {
-                        if (!fSink.eventHandler.skips(.eol)) {
+                        // This check basically costs nothing
+                        if (fSink.eventHandler.uses(.eol)) {
                             var charOpt: ?u8 = null;
                             if (lineCursor.lineToken > 0) {
                                 const lastChar = lineCursor.line[lineCursor.lineToken - 1];
@@ -379,25 +369,23 @@ pub fn matchFile(
 
                     lineCursor.matchNext(
                         rgx,
-                        fSink.eventHandler,
-                        argsRes,
                         &groupCursor,
                     ) catch |e| switch (e) {
                         regex.Regex.MatchError.BadUTF8Encode => continue :fileState .eof,
                         regex.Regex.MatchError.NoMatch => {
                             if (lineCursor.hadMatches) {
-                                if (!fSink.eventHandler.skips(.afterMatch)) {
+                                if (fSink.eventHandler.uses(.afterMatch)) {
                                     Context.event = .{
-                                        .afterMatch = &.{
+                                        .afterMatch = .{
                                             .slice = lineCursor.reminder(),
                                         },
                                     };
                                     _ = try fSink.consume(mode);
                                 }
                             } else {
-                                if (!fSink.eventHandler.skips(.noMatch)) {
+                                if (fSink.eventHandler.uses(.noMatch)) {
                                     Context.event = .{
-                                        .noMatch = &.{
+                                        .noMatch = .{
                                             .slice = lineCursor.reminder(),
                                         },
                                     };
@@ -423,24 +411,22 @@ pub fn matchFile(
                         };
                         const group = &groupCursor.currGroup;
 
-                        if (group.start < groupCursor.lineToken) {
+                        if (groupCursor.startsAfterTracker()) {
                             groupCursor.skipGroup();
                             continue :groupLoop;
                         }
 
-                        if (!fSink.eventHandler.skips(.beforeGroup))
+                        if (fSink.eventHandler.uses(.beforeGroup))
                             if (groupCursor.beforeMatch()) |slice| {
                                 Context.event = .{
-                                    .beforeGroup = &.{
+                                    .beforeGroup = .{
                                         .slice = slice,
                                         .n = group.n,
                                     },
                                 };
                                 const res = try fSink.consume(mode);
                                 switch (res) {
-                                    .consumed => {
-                                        groupCursor.moveTo(group.start);
-                                    },
+                                    .consumed => groupCursor.moveToGroupStart(),
                                     .consumedLine => {
                                         lineCursor.finish();
                                         continue :lineLoop;
@@ -450,13 +436,13 @@ pub fn matchFile(
                             };
 
                         if (groupCursor.isExcluded()) {
-                            if (fSink.eventHandler.skips(.excludedGroup)) {
+                            if (!fSink.eventHandler.uses(.excludedGroup)) {
                                 groupCursor.skipGroup();
                                 continue :groupLoop;
                             }
 
                             Context.event = .{
-                                .excludedGroup = &.{
+                                .excludedGroup = .{
                                     .group = group,
                                     .hasMore = groupCursor.hasMoreGroups(),
                                 },
@@ -466,8 +452,8 @@ pub fn matchFile(
                                 .cropLine,
                                 => {
                                     groupCursor.skipGroup();
-                                    groupCursor.moveTo(group.start);
-                                    groupCursor.cropLine(group.end);
+                                    groupCursor.moveToGroupStart();
+                                    groupCursor.cropLineToEnd();
                                     continue :groupLoop;
                                 },
                                 .skipped,
@@ -489,20 +475,20 @@ pub fn matchFile(
                         }
 
                         const res: sink.Sink.ConsumeResponse = if (groupCursor.isEmptyGroup()) rv: {
-                            if (fSink.eventHandler.skips(.emptyGroup)) break :rv .skipped;
+                            if (!fSink.eventHandler.uses(.emptyGroup)) break :rv .skipped;
 
                             Context.event = .{
-                                .emptyGroup = &.{
+                                .emptyGroup = .{
                                     .group = group,
                                     .hasMore = groupCursor.hasMoreGroups(),
                                 },
                             };
                             break :rv try fSink.consume(mode);
                         } else rv: {
-                            if (fSink.eventHandler.skips(.groupMatch)) break :rv .skipped;
+                            if (!fSink.eventHandler.uses(.groupMatch)) break :rv .skipped;
 
                             Context.event = .{
-                                .groupMatch = &.{
+                                .groupMatch = .{
                                     .group = group,
                                     .hasMore = groupCursor.hasMoreGroups(),
                                 },
@@ -534,12 +520,12 @@ pub fn matchFile(
                     }
 
                     const reminderOpt = groupCursor.reminder();
-                    if (!fSink.eventHandler.skips(.endOfGroups)) {
+                    if (fSink.eventHandler.uses(.endOfGroups)) {
                         Context.event = .{
                             .endOfGroups = .{
                                 .sliceOpt = reminderOpt,
                                 // we are always +1
-                                .hadBreakline = groupCursor.backtrack() == '\n',
+                                .hadBreakline = groupCursor.lastIs('\n'),
                                 .group0Empty = groupCursor.isGroup0Empty(),
                             },
                         };
@@ -553,19 +539,11 @@ pub fn matchFile(
 
                 Context.event = .{
                     .eol = .{
-                        .charOpt = if (!lineCursor.hasBreakline()) '\n' else null,
+                        .charOpt = if (lineCursor.hasBreakline()) null else '\n',
                         .hadMatches = lineCursor.hadMatches,
                     },
                 };
                 _ = try fSink.consume(mode);
-
-                // NOTE: this avoids one extra syscall for read
-                if (readEvent == .eofChunk) {
-                    Context.event = .eof;
-                    _ = try fSink.consume(mode);
-
-                    break :fileLoop;
-                }
             },
         }
     }
@@ -573,7 +551,6 @@ pub fn matchFile(
 
 pub const GroupMatchCursor = struct {
     current: u16,
-    count: u16,
     match: regex.RegexMatch,
     group0: regex.RegexMatchGroup,
     currGroup: regex.RegexMatchGroup,
@@ -581,28 +558,20 @@ pub const GroupMatchCursor = struct {
     line: []const u8,
     lineToken: usize,
 
-    pub const InitErr = args.Args.TargetGroupError || LoadGroupError;
-
     pub fn init(
         self: *@This(),
-        line: []const u8,
-        lineToken: usize,
+        lineCursor: *const LineMatchCursor,
         match: regex.RegexMatch,
-        eventHandlerT: sink.EventHanderT,
-        argsRes: *const args.ArgsRes,
-    ) InitErr!void {
+        targetGroup: args.TargetGroup,
+    ) LoadGroupError!void {
         self.* = .{
             .current = 0,
-            .count = match.count,
             .match = match,
             .group0 = undefined,
             .currGroup = undefined,
-            .targetGroup = try argsRes.options.targetGroup(
-                eventHandlerT,
-                match.count,
-            ),
-            .line = line,
-            .lineToken = lineToken,
+            .targetGroup = targetGroup,
+            .line = lineCursor.line,
+            .lineToken = lineCursor.lineToken,
         };
         try self.loadGroup();
         self.group0 = self.currGroup;
@@ -615,24 +584,30 @@ pub const GroupMatchCursor = struct {
 
     pub fn loadGroup(self: *@This()) LoadGroupError!void {
         // NOTE: Out of bound group is treated as an error
-        const group = self.match.group(self.current) catch |e| switch (e) {
-            regex.RegexMatch.GroupError.GroupSkipped => {
-                if (self.current == 0) return LoadGroupError.Group0Skipped;
-                self.current += 1;
-                try self.loadGroup();
-                return;
-            },
-            else => return e,
-        };
-        self.currGroup = group;
+        while (true) {
+            const group = self.match.group(self.current) catch |e| switch (e) {
+                regex.RegexMatch.GroupError.GroupSkipped => {
+                    if (self.current == 0) return LoadGroupError.Group0Skipped;
+                    self.current += 1;
+                    continue;
+                },
+                else => return e,
+            };
+            self.currGroup = group;
+            break;
+        }
     }
 
     pub const CurrentError = error{
         GroupNotFound,
     };
 
+    pub fn startsAfterTracker(self: *const @This()) bool {
+        return self.currGroup.start < self.lineToken;
+    }
+
     pub fn maxGroup(self: *const @This()) u16 {
-        return self.count - 1;
+        return self.match.count - 1;
     }
 
     pub fn isCurrentMax(self: *const @This()) bool {
@@ -648,12 +623,12 @@ pub const GroupMatchCursor = struct {
         self.lineToken += 1;
     }
 
-    pub fn moveTo(self: *@This(), at: usize) void {
-        assert(at < self.line.len);
-        self.lineToken = at;
+    pub fn moveToGroupStart(self: *@This()) void {
+        self.lineToken = self.currGroup.start;
     }
 
-    pub fn cropLine(self: *@This(), to: usize) void {
+    pub fn cropLineToEnd(self: *@This()) void {
+        const to = self.currGroup.end;
         assert(to <= self.line.len);
         assert(self.lineToken <= to);
         self.line = self.line[0..to];
@@ -675,12 +650,12 @@ pub const GroupMatchCursor = struct {
         return self.group0.start == self.group0.end;
     }
 
-    pub fn backtrack(self: *const @This()) u8 {
+    pub fn lastIs(self: *const @This(), comptime c: u8) bool {
         const i: usize = if (self.lineToken > 0)
             self.lineToken - 1
         else
             0;
-        return self.line[i];
+        return self.line[i] == c;
     }
 
     pub fn consume(self: *@This()) void {
@@ -720,7 +695,7 @@ pub const GroupMatchCursor = struct {
     }
 
     pub fn hasNextGroup(self: *const @This()) bool {
-        return self.current < self.count;
+        return self.current < self.match.count;
     }
 };
 
@@ -729,21 +704,19 @@ pub const LineMatchCursor = struct {
     lineToken: usize,
     hadMatches: bool,
 
-    pub fn init(self: *@This(), line: []const u8) void {
+    pub fn init(self: *@This()) void {
         self.* = .{
-            .line = line,
+            .line = Context.baseEvent.line,
             .hadMatches = false,
             .lineToken = 0,
         };
     }
 
-    pub const ErrorNext = regex.Regex.MatchError || GroupMatchCursor.InitErr;
+    pub const ErrorNext = regex.Regex.MatchError || GroupMatchCursor.LoadGroupError;
 
     pub fn matchNext(
         self: *@This(),
         rgx: regex.Regex,
-        eventHandlerT: sink.EventHanderT,
-        argsRes: *const args.ArgsRes,
         groupCursor: *GroupMatchCursor,
     ) ErrorNext!void {
         // NOTE: this check is here because of fastBadUTF8Skip
@@ -756,11 +729,12 @@ pub const LineMatchCursor = struct {
         self.hadMatches = true;
 
         try groupCursor.init(
-            self.line,
-            self.lineToken,
+            self,
             match,
-            eventHandlerT,
-            argsRes,
+            Context.argsRes.options.targetGroup(
+                Context.sinkp.eventHandler,
+                match.count,
+            ),
         );
     }
 

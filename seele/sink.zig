@@ -76,9 +76,9 @@ pub const EventHandler = union(enum) {
         }
     }
 
-    pub fn skips(self: *const @This(), comptime eventT: EventT) bool {
+    pub fn uses(self: *const @This(), comptime eventT: EventT) bool {
         return switch (self.*) {
-            inline else => |handler| @TypeOf(handler).skips(eventT),
+            inline else => |handler| @TypeOf(handler).uses(eventT),
         };
     }
 };
@@ -86,12 +86,11 @@ pub const EventHandler = union(enum) {
 pub fn pickEventHandler(
     fDetailed: *const fs.DetailedFile,
     argsRes: *const args.ArgsRes,
-    sink: *Sink,
 ) EventHandler {
     const showLines = argsRes.options.@"line-number";
 
     if (argsRes.options.@"invert-match") return .{
-        .nonMatchingLine = .init(showLines, .noColor, sink),
+        .nonMatchingLine = .init(showLines, .noColor),
     };
 
     switch (fDetailed.fileType) {
@@ -106,7 +105,6 @@ pub fn pickEventHandler(
                     .matchOnly = .init(
                         showLines,
                         colorPattern,
-                        sink,
                     ),
                 };
             }
@@ -117,7 +115,6 @@ pub fn pickEventHandler(
                         argsRes.options.@"group-delimiter",
                         showLines,
                         colorPattern,
-                        sink,
                     ),
                 };
             } else {
@@ -126,14 +123,12 @@ pub fn pickEventHandler(
                         .lineOnMatch = .init(
                             showLines,
                             colorPattern,
-                            sink,
                         ),
                     },
                     else => .{
                         .matchInLine = .init(
                             showLines,
                             colorPattern,
-                            sink,
                         ),
                     },
                 };
@@ -147,7 +142,6 @@ pub fn pickEventHandler(
                 .matchOnly = .init(
                     showLines,
                     .noColor,
-                    sink,
                 ),
             };
             if (argsRes.options.@"group-only") return .{
@@ -155,14 +149,12 @@ pub fn pickEventHandler(
                     argsRes.options.@"group-delimiter",
                     showLines,
                     .noColor,
-                    sink,
                 ),
             };
             return .{
                 .lineOnMatch = .init(
                     showLines,
                     .noColor,
-                    sink,
                 ),
             };
         },
@@ -356,12 +348,12 @@ pub const SliceEvent = struct {
 pub const EventT = @typeInfo(Event).@"union".tag_type.?;
 
 pub const Event = union(enum) {
-    emptyGroup: *const MatchEvent,
-    excludedGroup: *const MatchEvent,
-    beforeGroup: *const BeforeGroup,
-    groupMatch: *const MatchEvent,
-    afterMatch: *const SliceEvent,
-    noMatch: *const SliceEvent,
+    emptyGroup: MatchEvent,
+    excludedGroup: MatchEvent,
+    beforeGroup: BeforeGroup,
+    groupMatch: MatchEvent,
+    afterMatch: SliceEvent,
+    noMatch: SliceEvent,
     endOfGroups: EndOfGroups,
     eol: EolEvent,
     eof,
@@ -646,7 +638,6 @@ pub const Sink = struct {
     colorEnabled: bool = false,
     sinkWriter: SinkWriter,
 
-    // TODO: send ptr here
     pub fn init(
         self: *@This(),
         fDetailed: *const fs.DetailedFile,
@@ -656,7 +647,6 @@ pub const Sink = struct {
         const eventHandler = pickEventHandler(
             fDetailed,
             argsRes,
-            self,
         );
         self.* = .{
             .fileType = fDetailed.fileType,
@@ -675,13 +665,16 @@ pub const Sink = struct {
     } ||
         Writer.Error;
 
-    pub fn writeVecAll(self: *@This(), data: [][]const u8, comptime validate: bool) SinkWriteError!void {
+    pub fn writeVecAll(self: *@This(), comptime validate: bool) SinkWriteError!void {
+        const data: [][]const u8 = Context.getSlices();
         if (comptime validate) {
             const hasColor = self.eventHandler.hasColor();
             var i: usize = data.len;
 
-            while (i > 0) {
-                if (!std.unicode.utf8ValidateSlice(data[i - 1])) return SinkWriteError.BadUTF8Encoding;
+            while (i > Context.buffAt) {
+                if (!std.unicode.utf8ValidateSlice(data[i - 1]))
+                    return SinkWriteError.BadUTF8Encoding;
+
                 i -= if (hasColor) rv: {
                     break :rv if (i >= 2) 2 else 1;
                 } else 1;
@@ -823,13 +816,11 @@ pub const GroupOnly = struct {
     showLines: bool,
     fDetailed: ?*const fs.DetailedFile = null,
     lastLine: usize = 0,
-    sink: *Sink,
 
     pub fn init(
         delimiter: u8,
         showLines: bool,
         pattern: tty.ColorPattern,
-        sink: *Sink,
     ) @This() {
         return .{
             .delimiter = switch (delimiter) {
@@ -837,7 +828,6 @@ pub const GroupOnly = struct {
             },
             .showLines = showLines,
             .colorPicker = .init(pattern),
-            .sink = sink,
         };
     }
 
@@ -850,14 +840,14 @@ pub const GroupOnly = struct {
         return self.delimiter;
     }
 
-    pub fn skips(comptime eventT: EventT) bool {
+    pub fn uses(comptime eventT: EventT) bool {
         return switch (eventT) {
             .afterMatch,
             .noMatch,
             .excludedGroup,
             .beforeGroup,
-            => true,
-            else => false,
+            => false,
+            else => true,
         };
     }
 
@@ -872,16 +862,18 @@ pub const GroupOnly = struct {
             => |emptyEvent| {
                 if (!emptyEvent.hasMore) return .skipped;
 
+                defer Context.buffAt = 0;
                 if (self.writeLine)
                     try MatchOnly.showPrefixes(self);
 
                 var chunks = self.colorPicker.chunks(1, emptyEvent.group.n);
                 chunks.clearChunk(self.delimiter);
-                try self.sink.writeVecAll(chunks.slices(), false);
+                try Context.sinkp.writeVecAll(false);
 
                 return .consumed;
             },
             .groupMatch => |matchEvent| {
+                defer Context.buffAt = 0;
                 if (self.writeLine)
                     try MatchOnly.showPrefixes(self);
 
@@ -896,7 +888,7 @@ pub const GroupOnly = struct {
                 else
                     chunks.breakline();
 
-                try self.sink.writeVecAll(chunks.slices(), true);
+                try Context.sinkp.writeVecAll(true);
 
                 return .consumed;
             },
@@ -906,7 +898,7 @@ pub const GroupOnly = struct {
                 return .skipped;
             },
             .eol,
-            => return try MatchOnly.endLine(self),
+            => return try MatchOnly.endLine(),
             .eof,
             => return try MatchInLine.endOfFile(self),
         }
@@ -919,17 +911,14 @@ pub const MatchOnly = struct {
     fDetailed: ?*const fs.DetailedFile = null,
     writeLine: bool = true,
     lastLine: usize = 0,
-    sink: *Sink,
 
     pub fn init(
         showLines: bool,
         pattern: tty.ColorPattern,
-        sink: *Sink,
     ) @This() {
         return .{
             .showLines = showLines,
             .colorPicker = .init(pattern),
-            .sink = sink,
         };
     }
 
@@ -942,13 +931,13 @@ pub const MatchOnly = struct {
         self.writeLine = true;
     }
 
-    pub fn skips(comptime eventT: EventT) bool {
+    pub fn uses(comptime eventT: EventT) bool {
         return switch (eventT) {
             .afterMatch,
             .noMatch,
             .emptyGroup,
-            => true,
-            else => false,
+            => false,
+            else => true,
         };
     }
 
@@ -962,6 +951,7 @@ pub const MatchOnly = struct {
             => |excluded| {
                 if (excluded.group.n == 0 and excluded.hasMore) return .cropLine;
 
+                defer Context.buffAt = 0;
                 if (self.writeLine)
                     try self.showPrefixes();
 
@@ -975,6 +965,7 @@ pub const MatchOnly = struct {
             => |before| {
                 if (before.n == 0) return .skipped;
 
+                defer Context.buffAt = 0;
                 if (self.writeLine)
                     try self.showPrefixes();
 
@@ -991,6 +982,7 @@ pub const MatchOnly = struct {
             },
             .groupMatch,
             => |match| {
+                defer Context.buffAt = 0;
                 if (self.writeLine or match.group.n == 0)
                     try self.showPrefixes();
 
@@ -1002,14 +994,12 @@ pub const MatchOnly = struct {
                 return .consumed;
             },
             .eol,
-            => return try self.endLine(),
+            => return try MatchOnly.endLine(),
             .eof,
             => return try MatchInLine.endOfFile(self),
         };
     }
 
-    // BUG: because this is split from line validation, we may write this and skip
-    // writing the actual data, resulting in an empty line
     pub fn showPrefixes(self: anytype) Sink.ConsumeError!void {
         self.lastLine = 0;
         try MatchInLine.showPrefixes(self);
@@ -1030,7 +1020,7 @@ pub const MatchOnly = struct {
                 chunks.skipChunk()
             else
                 chunks.breakline();
-            try self.sink.writeVecAll(chunks.slices(), true);
+            try Context.sinkp.writeVecAll(true);
             return .consumed;
         }
 
@@ -1038,12 +1028,12 @@ pub const MatchOnly = struct {
         return .consumed;
     }
 
-    pub fn endLine(self: anytype) Sink.ConsumeError!Sink.ConsumeResponse {
+    pub fn endLine() Sink.ConsumeError!Sink.ConsumeResponse {
         assert(Context.event == .eol);
         const eolEvent = Context.event.eol;
 
         if (eolEvent.hadMatches) {
-            try self.sink.sinkLine();
+            try Context.sinkp.sinkLine();
             return .consumed;
         } else return .skipped;
     }
@@ -1054,17 +1044,14 @@ pub const NonMatchingLine = struct {
     showLines: bool,
     fDetailed: ?*const fs.DetailedFile = null,
     lastLine: usize = 0,
-    sink: *Sink,
 
     pub fn init(
         showLines: bool,
         pattern: tty.ColorPattern,
-        sink: *Sink,
     ) @This() {
         return .{
             .showLines = showLines,
             .colorPicker = .init(pattern),
-            .sink = sink,
         };
     }
 
@@ -1076,9 +1063,9 @@ pub const NonMatchingLine = struct {
         self.lastLine = 0;
     }
 
-    pub fn skips(comptime eventT: EventT) bool {
+    pub fn uses(comptime eventT: EventT) bool {
         return switch (eventT) {
-            else => false,
+            else => true,
         };
     }
 
@@ -1107,7 +1094,7 @@ pub const NonMatchingLine = struct {
                 assert(char == '\n');
                 try MatchInLine.breakline(self);
             }
-            try self.sink.sinkLine();
+            try Context.sinkp.sinkLine();
             return .consumed;
         } else return .skipped;
     }
@@ -1118,17 +1105,14 @@ pub const LineOnMatch = struct {
     showLines: bool,
     fDetailed: ?*const fs.DetailedFile = null,
     lastLine: usize = 0,
-    sink: *Sink,
 
     pub fn init(
         showLines: bool,
         pattern: tty.ColorPattern,
-        sink: *Sink,
     ) @This() {
         return .{
             .showLines = showLines,
             .colorPicker = .init(pattern),
-            .sink = sink,
         };
     }
 
@@ -1140,14 +1124,14 @@ pub const LineOnMatch = struct {
         self.lastLine = 0;
     }
 
-    pub fn skips(comptime eventT: EventT) bool {
+    pub fn uses(comptime eventT: EventT) bool {
         return switch (eventT) {
             .beforeGroup,
             .afterMatch,
             .noMatch,
             .endOfGroups,
-            => true,
-            else => false,
+            => false,
+            else => true,
         };
     }
 
@@ -1170,6 +1154,7 @@ pub const LineOnMatch = struct {
     }
 
     pub fn consumeLine(self: anytype) Sink.ConsumeError!Sink.ConsumeResponse {
+        defer Context.buffAt = 0;
         try MatchInLine.showPrefixes(self);
         try MatchInLine.writeClear(self, Context.baseEvent.line);
         return .consumedLine;
@@ -1181,17 +1166,14 @@ pub const MatchInLine = struct {
     showLines: bool,
     fDetailed: ?*const fs.DetailedFile = null,
     lastLine: usize = 0,
-    sink: *Sink,
 
     pub fn init(
         showLines: bool,
         pattern: tty.ColorPattern,
-        sink: *Sink,
     ) @This() {
         return .{
             .showLines = showLines,
             .colorPicker = .init(pattern),
-            .sink = sink,
         };
     }
 
@@ -1203,12 +1185,12 @@ pub const MatchInLine = struct {
         self.lastLine = 0;
     }
 
-    pub fn skips(comptime eventT: EventT) bool {
+    pub fn uses(comptime eventT: EventT) bool {
         return switch (eventT) {
             .excludedGroup,
             .noMatch,
-            => true,
-            else => false,
+            => false,
+            else => true,
         };
     }
 
@@ -1244,7 +1226,7 @@ pub const MatchInLine = struct {
         if (endOfGroups.sliceOpt) |slice| {
             var chunks = self.colorPicker.chunks(1, 0);
             chunks.clearChunk(slice);
-            try self.sink.writeVecAll(chunks.slices(), true);
+            try Context.sinkp.writeVecAll(true);
             return .consumed;
         }
 
@@ -1255,6 +1237,7 @@ pub const MatchInLine = struct {
         assert(Context.event == .groupMatch);
         const matchEvent = Context.event.groupMatch;
 
+        defer Context.buffAt = 0;
         try self.showPrefixes();
         try self.writeColored(
             matchEvent.group.slice(Context.baseEvent.line),
@@ -1268,6 +1251,7 @@ pub const MatchInLine = struct {
         const beforeGroupEvent = Context.event.beforeGroup;
         const slice = beforeGroupEvent.slice;
 
+        defer Context.buffAt = 0;
         try self.showPrefixes();
         try self.writeClear(slice);
 
@@ -1292,15 +1276,13 @@ pub const MatchInLine = struct {
                 );
                 _ = self.colorPicker.reset();
 
-                try self.sink.writeVecAll(chunks.slices(), false);
+                Context.buffAt = Context.slices.len;
                 self.lastLine = lineN;
             }
 
             if (self.showLines) {
                 var chunks = self.colorPicker.chunks(2, 0);
-                const buffLen = comptime std.fmt.count("{d}", .{std.math.maxInt(usize)});
-                var buff: [buffLen]u8 = undefined;
-                const lineNStr = try std.fmt.bufPrint(&buff, "{d}", .{lineN});
+                const lineNStr = try std.fmt.bufPrint(&Context.lineNBuff, "{d}", .{lineN});
                 chunks.forceColoredChunk(tty.EscapeColor.green.escapeCode(), lineNStr);
                 chunks.forceColoredChunk(
                     tty.EscapeColor.reset.escapeCode(),
@@ -1308,7 +1290,7 @@ pub const MatchInLine = struct {
                 );
                 _ = self.colorPicker.reset();
 
-                try self.sink.writeVecAll(chunks.slices(), false);
+                Context.buffAt = Context.slices.len;
                 self.lastLine = lineN;
             }
         }
@@ -1317,9 +1299,10 @@ pub const MatchInLine = struct {
     pub fn endOfFile(self: anytype) Sink.ConsumeError!Sink.ConsumeResponse {
         assert(Context.event == .eof);
 
-        var buff: [1][]const u8 = .{self.colorPicker.reset()};
-        try self.sink.writeVecAll(&buff, false);
-        try self.sink.sink();
+        Context.slice(1);
+        Context.slices[0] = self.colorPicker.reset();
+        try Context.sinkp.writeVecAll(false);
+        try Context.sinkp.sink();
         return .consumed;
     }
 
@@ -1333,7 +1316,7 @@ pub const MatchInLine = struct {
                 assert(char == '\n');
                 try MatchInLine.breakline(self);
             }
-            try self.sink.sinkLine();
+            try Context.sinkp.sinkLine();
             return .consumed;
         } else return .skipped;
     }
@@ -1356,6 +1339,7 @@ pub const MatchInLine = struct {
         assert(group.start == group.end);
         const line = Context.baseEvent.line;
 
+        defer Context.buffAt = 0;
         try self.showPrefixes();
         try self.writeClear(&.{line[group.start]});
         return .consumed;
@@ -1364,19 +1348,19 @@ pub const MatchInLine = struct {
     pub fn writeColored(self: anytype, slice: []const u8, offset: u16) Sink.ConsumeError!void {
         var chunks = self.colorPicker.chunks(1, offset);
         chunks.coloredChunk(slice);
-        try self.sink.writeVecAll(chunks.slices(), true);
+        try Context.sinkp.writeVecAll(true);
     }
 
     pub fn breakline(self: anytype) Sink.ConsumeError!void {
         var chunks = self.colorPicker.chunks(1, 0);
         chunks.breakline();
-        try self.sink.writeVecAll(chunks.slices(), false);
+        try Context.sinkp.writeVecAll(false);
     }
 
     pub fn writeClear(self: anytype, slice: []const u8) Sink.ConsumeError!void {
         var chunks = self.colorPicker.chunks(1, 0);
         chunks.clearChunk(slice);
-        try self.sink.writeVecAll(chunks.slices(), true);
+        try Context.sinkp.writeVecAll(true);
     }
 };
 

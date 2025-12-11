@@ -40,13 +40,17 @@ pub fn compile(
     options: CompileOptions,
 ) CompileError!Result(Regex, RegexError) {
     const compContext = c.pcre2_compile_context_create_8(null) orelse {
+        @branchHint(.cold);
         return CompileError.RegexInitFailed;
     };
     defer if (builtin.mode == .Debug) c.pcre2_compile_context_free_8(compContext);
 
     switch (c.pcre2_set_newline_8(compContext, c.PCRE2_NEWLINE_LF)) {
         0 => {},
-        c.PCRE2_ERROR_BADDATA => return CompileError.RegexInitFailed,
+        c.PCRE2_ERROR_BADDATA => {
+            @branchHint(.cold);
+            return CompileError.RegexInitFailed;
+        },
         // NOTE: no other error codes are defined in the source
         else => unreachable,
     }
@@ -69,6 +73,7 @@ pub fn compile(
         &errOff,
         compContext,
     ) orelse {
+        @branchHint(.unlikely);
         const buff = try allocator.alloc(u8, 4096);
         const end = c.pcre2_get_error_message_8(err, buff.ptr, buff.len);
 
@@ -84,6 +89,7 @@ pub fn compile(
     _ = c.pcre2_jit_compile_8(re, c.PCRE2_JIT_COMPLETE);
 
     const matchData = c.pcre2_match_data_create_from_pattern_8(re, null) orelse {
+        @branchHint(.cold);
         return CompileError.MatchDataInitFailed;
     };
 
@@ -114,10 +120,6 @@ pub const Regex = struct {
         UnknownError,
     };
 
-    pub fn match(self: *const @This(), data: []const u8) MatchError!?RegexMatch {
-        return try self.offsetMatch(data, 0);
-    }
-
     pub fn offsetMatch(
         self: *const @This(),
         data: []const u8,
@@ -145,7 +147,10 @@ pub const Regex = struct {
                 c.PCRE2_ERROR_UTF8_ERR21...c.PCRE2_ERROR_UTF8_ERR1 => return MatchError.BadUTF8Encode,
                 // NOTE: most error are data related or group related or utf related
                 // check the ERROR definition in the lib
-                else => return MatchError.UnknownError,
+                else => {
+                    @branchHint(.unlikely);
+                    return MatchError.UnknownError;
+                },
             }
         }
 
@@ -205,18 +210,25 @@ pub const RegexMatch = struct {
         GroupSkipped,
     };
 
-    pub fn group(self: *const @This(), n: usize) GroupError!RegexMatchGroup {
+    pub fn group(self: *const @This(), n: u16) GroupError!RegexMatchGroup {
         assert(n <= std.math.maxInt(u16));
-        if (n + 1 > self.count) return GroupError.InvalidGroup;
+        if (n >= self.count) {
+            @branchHint(.cold);
+            return GroupError.InvalidGroup;
+        }
         const start = n * 2;
         const end = n * 2 + 1;
         const idx0 = self.ovector[start];
         if (idx0 == c.PCRE2_UNSET) return GroupError.GroupSkipped;
         const idx1 = self.ovector[end];
+        if (idx1 == c.PCRE2_UNSET) {
+            @branchHint(.cold);
+            return GroupError.InvalidGroup;
+        }
 
         assert(idx0 != c.PCRE2_UNSET);
         assert(idx1 != c.PCRE2_UNSET);
-        return .init(@intCast(n), idx0, idx1);
+        return .init(n, idx0, idx1);
     }
 };
 

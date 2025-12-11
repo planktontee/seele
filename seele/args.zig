@@ -353,11 +353,7 @@ pub const Args = struct {
             (fileType == .tty and colored == null));
     }
 
-    pub const TargetGroupError = error{
-        InvalidGroupsForOptions,
-    };
-
-    pub fn targetGroup(self: *const @This(), eventHandlerT: sink.EventHanderT, maxGroups: u16) TargetGroupError!TargetGroup {
+    pub fn targetGroup(self: *const @This(), eventHandlerT: sink.EventHanderT, maxGroups: u16) TargetGroup {
         switch (eventHandlerT) {
             .matchInLine,
             .matchOnly,
