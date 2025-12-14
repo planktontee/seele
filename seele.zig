@@ -152,9 +152,11 @@ pub fn handleArgsAndRun() !RunReturn {
         .match = .initEmpty(Context.instance.scrapAlloc),
     };
 
+    Context.argsRes = &argsRes;
+
     return switch (@intFromBool(argsRes.options.trace)) {
-        0 => try run(.release, &argsRes),
-        1 => try run(.trace, &argsRes),
+        0 => try run(.release),
+        1 => try run(.trace),
     };
 }
 
@@ -176,57 +178,14 @@ pub const RunError = error{
     GroupMatchCursor.LoadGroupError ||
     std.Io.Writer.Error;
 
-const MatchData = struct {
-    matchCount: usize,
-    max: usize,
-
-    pub fn init(
-        max: usize,
-    ) @This() {
-        return .{
-            .matchCount = 0,
-            .max = max,
-        };
-    }
-
-    pub fn restart(self: *@This()) void {
-        self.matchCount = 0;
-    }
-
-    pub fn isDone(self: *const @This()) bool {
-        return self.max == self.matchCount;
-    }
-};
-
 const RunReturn = enum(u2) {
     ok = 0,
     matchNotFound = 1,
     badArgs = 2,
 };
 
-pub fn run(comptime mode: sink.Mode, argsRes: *const args.ArgsRes) RunError!RunReturn {
-    const scrapAlloactor = Context.instance.scrapAlloc;
-    const matchPattern = argsRes.positionals.tuple.@"0";
-    const result = try regex.compile(
-        Context.instance.scrapAlloc,
-        matchPattern,
-        argsRes.options.compileOptions(),
-    );
-
-    var rgx = switch (result) {
-        .Ok => |rgx| rgx,
-        .Err => |rgxErr| {
-            try Context.instance.stderrW.print(
-                "{s} [{d}]: {s}",
-                .{ @errorName(rgxErr.err), rgxErr.code, rgxErr.message },
-            );
-            if (builtin.mode == .Debug) rgxErr.deinit(scrapAlloactor);
-
-            try rgxErr.throw();
-            unreachable;
-        },
-    };
-    defer rgx.deinit();
+pub fn run(comptime mode: sink.Mode) RunError!RunReturn {
+    const argsRes = Context.argsRes;
 
     // TODO: add multiline
     if (!argsRes.options.@"line-by-line") return RunError.UnsupportedMatchMode;
@@ -257,8 +216,31 @@ pub fn run(comptime mode: sink.Mode, argsRes: *const args.ArgsRes) RunError!RunR
         argsRes,
     );
     defer Context.sinkp.deinit(Context.instance.outAlloc);
+    const fSink = &Context.sinkp;
 
-    var matchData: MatchData = undefined;
+    const scrapAlloactor = Context.instance.scrapAlloc;
+    const matchPattern = argsRes.positionals.tuple.@"0";
+    const result = try regex.compile(
+        Context.instance.scrapAlloc,
+        matchPattern,
+        argsRes.options.compileOptions(fSink.eventHandler),
+    );
+
+    var rgx = switch (result) {
+        .Ok => |rgx| rgx,
+        .Err => |rgxErr| {
+            try Context.instance.stderrW.print(
+                "{s} [{d}]: {s}",
+                .{ @errorName(rgxErr.err), rgxErr.code, rgxErr.message },
+            );
+            if (builtin.mode == .Debug) rgxErr.deinit(scrapAlloactor);
+
+            try rgxErr.throw();
+            unreachable;
+        },
+    };
+    defer rgx.deinit();
+
     var hadMatches = false;
 
     while (try fileCursor.next(scrapAlloactor)) |input| {
@@ -272,27 +254,39 @@ pub fn run(comptime mode: sink.Mode, argsRes: *const args.ArgsRes) RunError!RunR
                 argsRes.options.@"skip-binary",
             );
             firstMissing = false;
-            matchData = .init(argsRes.options.@"match-max");
             if (showFileName and !argsRes.options.@"no-file-name")
-                Context.sinkp.eventHandler.showFileName(&input);
+                fSink.eventHandler.showFileName(&input);
         } else {
             try fSource.loadSource(&input);
-            matchData.restart();
-            Context.sinkp.eventHandler.restart();
+            fSink.eventHandler.restart();
         }
 
-        matchFile(
-            mode,
-            argsRes,
-            rgx,
-            &fSource,
-            &matchData,
-        ) catch |e| switch (e) {
-            sink.Sink.SinkWriteError.BadUTF8Encoding => {},
-            else => return e,
-        };
+        switch (@as(sink.EventHanderT, fSink.eventHandler)) {
+            inline else => |eventT| {
+                switch (@intFromBool(argsRes.options.@"match-max" == std.math.maxInt(@TypeOf(argsRes.options.@"match-max")))) {
+                    inline else => |n| {
+                        switch (fSource.sourceReader) {
+                            inline else => |src| {
+                                const matchT = @as(MatchFlavour, @enumFromInt(n));
+                                const mCount = matchFile(
+                                    @FieldType(sink.EventHandler, @tagName(eventT)),
+                                    mode,
+                                    matchT,
+                                    rgx,
+                                    src,
+                                    &input,
+                                ) catch |e| switch (e) {
+                                    sink.Sink.SinkWriteError.BadUTF8Encoding => 0,
+                                    else => return e,
+                                };
 
-        hadMatches |= matchData.matchCount > 0;
+                                hadMatches |= mCount > 0;
+                            },
+                        }
+                    },
+                }
+            },
+        }
     } else {
         if (firstMissing) return RunError.BadInputFile;
     }
@@ -300,13 +294,19 @@ pub fn run(comptime mode: sink.Mode, argsRes: *const args.ArgsRes) RunError!RunR
     if (hadMatches) return .ok else return .matchNotFound;
 }
 
+const MatchFlavour = enum {
+    limited,
+    unlimited,
+};
+
 pub fn matchFile(
+    comptime EventT: type,
     comptime mode: sink.Mode,
-    argsRes: *const args.ArgsRes,
+    comptime matchT: MatchFlavour,
     rgx: regex.Regex,
-    fSource: *source.Source,
-    matchData: *MatchData,
-) !void {
+    fSource: anytype,
+    fDetailed: *const fs.DetailedFile,
+) !usize {
     // TODO:
     // checks for ovect[0] > ovect[1]
     // This happens when the match is partial
@@ -314,7 +314,8 @@ pub fn matchFile(
     // check for \K
     // \K handling needs partial and other types of handling for anchoring
 
-    Context.argsRes = argsRes;
+    const argsRes = Context.argsRes;
+    var matches: usize = 0;
 
     const fSink = &Context.sinkp;
     var lineCursor: LineMatchCursor = undefined;
@@ -322,46 +323,51 @@ pub fn matchFile(
     Context.baseEvent = .{
         .line = undefined,
         .lineN = 0,
-        .fDetailed = fSource.fDetailed,
+        .fDetailed = fDetailed,
     };
 
     fileLoop: while (true) {
         const readEvent = try fSource.nextLine();
         fileState: switch (readEvent) {
             .eof => {
-                Context.event = .eof;
-                _ = try fSink.consume(mode);
+                if (comptime EventT.uses(.eof)) {
+                    Context.event = .eof;
+                    _ = try fSink.consume(mode, EventT);
+                }
                 break :fileLoop;
             },
-            .eofChunk,
             .line,
             => |line| {
-                if (fSource.isInvalid())
+                if (fSource.isInvalid()) {
+                    @branchHint(.unlikely);
                     continue :fileState .eof;
+                }
 
                 Context.baseEvent.line = line;
                 Context.baseEvent.lineN += 1;
                 lineCursor.init();
 
                 lineLoop: while (lineCursor.hasReminder()) {
-                    if (matchData.isDone()) {
-                        // This check basically costs nothing
-                        if (fSink.eventHandler.uses(.eol)) {
-                            var charOpt: ?u8 = null;
-                            if (lineCursor.lineToken > 0) {
-                                const lastChar = lineCursor.line[lineCursor.lineToken - 1];
-                                if (lastChar != '\n') charOpt = '\n';
-                            }
+                    if (comptime matchT == .limited) {
+                        if (matches >= argsRes.options.@"match-max") {
+                            // This check basically costs nothing
+                            if (comptime EventT.uses(.eol)) {
+                                var charOpt: ?u8 = null;
+                                if (lineCursor.lineToken > 0) {
+                                    const lastChar = lineCursor.line[lineCursor.lineToken - 1];
+                                    if (lastChar != '\n') charOpt = '\n';
+                                }
 
-                            Context.event = .{
-                                .eol = .{
-                                    .charOpt = charOpt,
-                                    .hadMatches = lineCursor.hadMatches,
-                                },
-                            };
-                            _ = try fSink.consume(mode);
+                                Context.event = .{
+                                    .eol = .{
+                                        .charOpt = charOpt,
+                                        .hadMatches = lineCursor.hadMatches,
+                                    },
+                                };
+                                _ = try fSink.consume(mode, EventT);
+                            }
+                            continue :fileState .eof;
                         }
-                        continue :fileState .eof;
                     }
 
                     if (argsRes.options.@"validate-utf8")
@@ -371,33 +377,40 @@ pub fn matchFile(
                         rgx,
                         &groupCursor,
                     ) catch |e| switch (e) {
-                        regex.Regex.MatchError.BadUTF8Encode => continue :fileState .eof,
+                        regex.Regex.MatchError.BadUTF8Encode => {
+                            @branchHint(.unlikely);
+                            continue :fileState .eof;
+                        },
                         regex.Regex.MatchError.NoMatch => {
+                            @branchHint(.unpredictable);
                             if (lineCursor.hadMatches) {
-                                if (fSink.eventHandler.uses(.afterMatch)) {
+                                if (comptime EventT.uses(.afterMatch)) {
                                     Context.event = .{
                                         .afterMatch = .{
                                             .slice = lineCursor.reminder(),
                                         },
                                     };
-                                    _ = try fSink.consume(mode);
+                                    _ = try fSink.consume(mode, EventT);
                                 }
                             } else {
-                                if (fSink.eventHandler.uses(.noMatch)) {
+                                if (comptime EventT.uses(.noMatch)) {
                                     Context.event = .{
                                         .noMatch = .{
                                             .slice = lineCursor.reminder(),
                                         },
                                     };
-                                    _ = try fSink.consume(mode);
+                                    _ = try fSink.consume(mode, EventT);
                                 }
                             }
                             lineCursor.finish();
                             continue :lineLoop;
                         },
-                        else => return e,
+                        else => {
+                            @branchHint(.cold);
+                            return e;
+                        },
                     };
-                    matchData.matchCount += 1;
+                    matches += 1;
 
                     groupLoop: while (groupCursor.hasNextGroup()) {
                         groupCursor.loadGroup() catch |e| switch (e) {
@@ -407,7 +420,10 @@ pub fn matchFile(
                                 groupCursor.skipGroup();
                                 continue :groupLoop;
                             },
-                            else => return e,
+                            else => {
+                                @branchHint(.cold);
+                                return e;
+                            },
                         };
                         const group = &groupCursor.currGroup;
 
@@ -416,15 +432,15 @@ pub fn matchFile(
                             continue :groupLoop;
                         }
 
-                        if (fSink.eventHandler.uses(.beforeGroup))
-                            if (groupCursor.beforeMatch()) |slice| {
+                        if (comptime EventT.uses(.beforeGroup))
+                            if (groupCursor.hasBefore()) {
                                 Context.event = .{
                                     .beforeGroup = .{
-                                        .slice = slice,
+                                        .slice = groupCursor.beforeMatch(),
                                         .n = group.n,
                                     },
                                 };
-                                const res = try fSink.consume(mode);
+                                const res = try fSink.consume(mode, EventT);
                                 switch (res) {
                                     .consumed => groupCursor.moveToGroupStart(),
                                     .consumedLine => {
@@ -436,7 +452,7 @@ pub fn matchFile(
                             };
 
                         if (groupCursor.isExcluded()) {
-                            if (!fSink.eventHandler.uses(.excludedGroup)) {
+                            if (comptime !EventT.uses(.excludedGroup)) {
                                 groupCursor.skipGroup();
                                 continue :groupLoop;
                             }
@@ -447,7 +463,7 @@ pub fn matchFile(
                                     .hasMore = groupCursor.hasMoreGroups(),
                                 },
                             };
-                            const res = try fSink.consume(mode);
+                            const res = try fSink.consume(mode, EventT);
                             switch (res) {
                                 .cropLine,
                                 => {
@@ -474,26 +490,30 @@ pub fn matchFile(
                             }
                         }
 
-                        const res: sink.Sink.ConsumeResponse = if (groupCursor.isEmptyGroup()) rv: {
-                            if (!fSink.eventHandler.uses(.emptyGroup)) break :rv .skipped;
+                        const res: sink.Sink.ConsumeResponse = rv: {
+                            if (groupCursor.isEmptyGroup()) {
+                                if (comptime !EventT.uses(.emptyGroup))
+                                    break :rv .skipped;
 
-                            Context.event = .{
-                                .emptyGroup = .{
-                                    .group = group,
-                                    .hasMore = groupCursor.hasMoreGroups(),
-                                },
-                            };
-                            break :rv try fSink.consume(mode);
-                        } else rv: {
-                            if (!fSink.eventHandler.uses(.groupMatch)) break :rv .skipped;
+                                Context.event = .{
+                                    .emptyGroup = .{
+                                        .group = group,
+                                        .hasMore = groupCursor.hasMoreGroups(),
+                                    },
+                                };
+                                break :rv try fSink.consume(mode, EventT);
+                            } else {
+                                if (comptime !EventT.uses(.groupMatch))
+                                    break :rv .skipped;
 
-                            Context.event = .{
-                                .groupMatch = .{
-                                    .group = group,
-                                    .hasMore = groupCursor.hasMoreGroups(),
-                                },
-                            };
-                            break :rv try fSink.consume(mode);
+                                Context.event = .{
+                                    .groupMatch = .{
+                                        .group = group,
+                                        .hasMore = groupCursor.hasMoreGroups(),
+                                    },
+                                };
+                                break :rv try fSink.consume(mode, EventT);
+                            }
                         };
                         switch (res) {
                             .consumedLine => {
@@ -503,16 +523,15 @@ pub fn matchFile(
                             .skipped,
                             .consumed,
                             => {
+                                defer groupCursor.consume();
+
                                 if (groupCursor.isEmptyGroup() and
                                     (groupCursor.isCurrentMax() or groupCursor.isCurrent0()))
                                 {
-                                    groupCursor.consume();
                                     groupCursor.forwardOne();
-                                } else groupCursor.consume();
+                                }
 
-                                // NOTE: we need to use group instead because we move current to +1
-                                // on consumption
-                                if (group.n == 0)
+                                if (groupCursor.isCurrent0())
                                     break :groupLoop;
                             },
                             .cropLine => unreachable,
@@ -520,16 +539,15 @@ pub fn matchFile(
                     }
 
                     const reminderOpt = groupCursor.reminder();
-                    if (fSink.eventHandler.uses(.endOfGroups)) {
+                    if (comptime EventT.uses(.endOfGroups)) {
                         Context.event = .{
                             .endOfGroups = .{
                                 .sliceOpt = reminderOpt,
-                                // we are always +1
                                 .hadBreakline = groupCursor.lastIs('\n'),
                                 .group0Empty = groupCursor.isGroup0Empty(),
                             },
                         };
-                        _ = try fSink.consume(mode);
+                        _ = try fSink.consume(mode, EventT);
                     }
                     if (reminderOpt != null)
                         groupCursor.finishGroup0();
@@ -537,16 +555,19 @@ pub fn matchFile(
                     lineCursor.forwardTo(groupCursor.lineToken);
                 }
 
-                Context.event = .{
-                    .eol = .{
-                        .charOpt = if (lineCursor.hasBreakline()) null else '\n',
-                        .hadMatches = lineCursor.hadMatches,
-                    },
-                };
-                _ = try fSink.consume(mode);
+                if (comptime EventT.uses(.eol)) {
+                    Context.event = .{
+                        .eol = .{
+                            .charOpt = if (lineCursor.hasBreakline()) null else '\n',
+                            .hadMatches = lineCursor.hadMatches,
+                        },
+                    };
+                    _ = try fSink.consume(mode, EventT);
+                }
             },
         }
     }
+    return matches;
 }
 
 pub const GroupMatchCursor = struct {
@@ -557,6 +578,7 @@ pub const GroupMatchCursor = struct {
     targetGroup: args.TargetGroup,
     line: []const u8,
     lineToken: usize,
+    max: u16,
 
     pub fn init(
         self: *@This(),
@@ -572,6 +594,10 @@ pub const GroupMatchCursor = struct {
             .targetGroup = targetGroup,
             .line = lineCursor.line,
             .lineToken = lineCursor.lineToken,
+            .max = @min(
+                match.count,
+                if (targetGroup == .zero) @as(u16, 1) else std.math.maxInt(u16),
+            ),
         };
         try self.loadGroup();
         self.group0 = self.currGroup;
@@ -585,13 +611,25 @@ pub const GroupMatchCursor = struct {
     pub fn loadGroup(self: *@This()) LoadGroupError!void {
         // NOTE: Out of bound group is treated as an error
         while (true) {
-            const group = self.match.group(self.current) catch |e| switch (e) {
-                regex.RegexMatch.GroupError.GroupSkipped => {
-                    if (self.current == 0) return LoadGroupError.Group0Skipped;
-                    self.current += 1;
-                    continue;
-                },
-                else => return e,
+            const group = self.match.group(self.current) catch |e| {
+                @branchHint(.unlikely);
+
+                switch (e) {
+                    regex.RegexMatch.GroupError.GroupSkipped => {
+                        @branchHint(.unlikely);
+
+                        if (self.current == 0) {
+                            @branchHint(.cold);
+                            return LoadGroupError.Group0Skipped;
+                        }
+                        self.current += 1;
+                        continue;
+                    },
+                    else => {
+                        @branchHint(.cold);
+                        return e;
+                    },
+                }
             };
             self.currGroup = group;
             break;
@@ -672,10 +710,13 @@ pub const GroupMatchCursor = struct {
         return !self.targetGroup.includes(self.current);
     }
 
-    pub fn beforeMatch(self: *const @This()) ?[]const u8 {
-        const group = self.currGroup;
+    pub fn hasBefore(self: *const @This()) bool {
+        return self.lineToken < self.currGroup.start;
+    }
 
-        if (self.lineToken >= group.start) return null;
+    pub fn beforeMatch(self: *const @This()) []const u8 {
+        const group = self.currGroup;
+        assert(self.lineToken < group.start);
 
         return self.line[self.lineToken..group.start];
     }
@@ -695,7 +736,7 @@ pub const GroupMatchCursor = struct {
     }
 
     pub fn hasNextGroup(self: *const @This()) bool {
-        return self.current < self.match.count;
+        return self.current < self.max;
     }
 };
 

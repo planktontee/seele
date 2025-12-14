@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 const units = @import("regent").units;
 const fs = @import("fs.zig");
 const c = @import("c.zig").c;
-const context = @import("context.zig");
+const Context = @import("context.zig");
 const File = std.fs.File;
 const Reader = std.Io.Reader;
 const Writer = std.Io.Writer;
@@ -47,7 +47,6 @@ pub fn pickSourceBuffer(fDetailed: *const fs.DetailedFile, isRecursive: bool) So
 
 pub const ReadEvent = union(enum) {
     eof,
-    eofChunk: []const u8,
     line: []const u8,
 
     pub const Error = error{
@@ -58,7 +57,7 @@ pub const ReadEvent = union(enum) {
 
 pub const MmapLineReader = struct {
     buffer: []align(std.heap.page_size_min) u8,
-    reader: Reader,
+    at: usize,
     isInvalidFlag: bool = false,
     validateBin: bool = false,
 
@@ -68,29 +67,26 @@ pub const MmapLineReader = struct {
         validateBin: bool,
     ) void {
         self.buffer = buffer;
-        self.reader = .fixed(buffer);
         self.validateBin = validateBin;
         // TODO: this is mutch faster than checking every line
         // however for match counted and cases were we abruptly stop the match
         // this will be really slow and we need a different behaviour based on those flags
-        self.isInvalidFlag = if (validateBin) FileValidatorReader.isInvalid(self.buffer) else false;
+        self.isInvalidFlag = if (validateBin) FileValidatorReader.isBinary(self.buffer) else false;
+        self.at = 0;
     }
 
     pub fn nextLine(self: *@This()) ReadEvent.Error!ReadEvent {
-        var r = &self.reader;
-        const line = r.takeDelimiterInclusive('\n') catch |e| switch (e) {
-            std.Io.Reader.DelimiterError.EndOfStream => {
-                if (r.bufferedLen() == 0) return .eof;
-                const slice = r.buffered();
-                r.toss(slice.len);
+        if (self.at == self.buffer.len) return .eof;
 
-                return .{ .eofChunk = slice };
-            },
-            std.Io.Reader.DelimiterError.ReadFailed,
-            => return ReadEvent.Error.ReadFailed,
-            std.Io.Reader.DelimiterError.StreamTooLong => unreachable,
-        };
-        return .{ .line = line };
+        if (std.mem.indexOfScalarPos(u8, self.buffer, self.at, '\n')) |at| {
+            const slice = self.buffer[self.at .. at + 1];
+            self.at = at + 1;
+            return .{ .line = slice };
+        } else {
+            const slice = self.buffer[self.at..self.buffer.len];
+            self.at = self.buffer.len;
+            return .{ .line = slice };
+        }
     }
 
     pub fn isInvalid(self: *const @This()) bool {
@@ -157,12 +153,10 @@ pub const FileValidatorReader = struct {
     pub fn stream(r: *Reader, w: *Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
         const self: *@This() = @fieldParentPtr("interface", r);
         self.syncBackend();
-        const chunk = self.backend.vtable.stream(self.backend, w, limit) catch |e| switch (e) {
-            else => {
-                self.checkFile();
-                self.syncFromBackend();
-                return e;
-            },
+        const chunk = self.backend.vtable.stream(self.backend, w, limit) catch |e| {
+            self.checkFile();
+            self.syncFromBackend();
+            return e;
         };
         self.checkFile();
         self.syncFromBackend();
@@ -172,11 +166,9 @@ pub const FileValidatorReader = struct {
     pub fn discard(r: *Reader, limit: std.Io.Limit) std.Io.Reader.Error!usize {
         const self: *@This() = @fieldParentPtr("interface", r);
         self.syncBackend();
-        const chunk = self.backend.vtable.discard(self.backend, limit) catch |e| switch (e) {
-            else => {
-                self.syncFromBackend();
-                return e;
-            },
+        const chunk = self.backend.vtable.discard(self.backend, limit) catch |e| {
+            self.syncFromBackend();
+            return e;
         };
         self.syncFromBackend();
         return chunk;
@@ -185,12 +177,10 @@ pub const FileValidatorReader = struct {
     pub fn readVec(r: *Reader, data: [][]u8) std.Io.Reader.Error!usize {
         const self: *@This() = @fieldParentPtr("interface", r);
         self.syncBackend();
-        const chunk = self.backend.vtable.readVec(self.backend, data) catch |e| switch (e) {
-            else => {
-                self.checkFile();
-                self.syncFromBackend();
-                return e;
-            },
+        const chunk = self.backend.vtable.readVec(self.backend, data) catch |e| {
+            self.checkFile();
+            self.syncFromBackend();
+            return e;
         };
         self.checkFile();
         self.syncFromBackend();
@@ -200,11 +190,9 @@ pub const FileValidatorReader = struct {
     pub fn rebase(r: *Reader, capacity: usize) std.Io.Reader.RebaseError!void {
         const self: *@This() = @fieldParentPtr("interface", r);
         self.syncBackend();
-        self.backend.vtable.rebase(self.backend, capacity) catch |e| switch (e) {
-            else => {
-                self.syncFromBackend();
-                return e;
-            },
+        self.backend.vtable.rebase(self.backend, capacity) catch |e| {
+            self.syncFromBackend();
+            return e;
         };
         self.syncFromBackend();
     }
@@ -226,11 +214,7 @@ pub const FileValidatorReader = struct {
         if (self.interface.end >= self.backend.end) return;
 
         const slice = self.backend.buffer[self.interface.end..self.backend.end];
-        self.isInvalidFlag = isInvalid(slice);
-    }
-
-    pub fn isInvalid(slice: []const u8) bool {
-        return isBinary(slice);
+        self.isInvalidFlag = isBinary(slice);
     }
 
     pub fn isBinary(chunk: []const u8) bool {
@@ -241,10 +225,11 @@ pub const FileValidatorReader = struct {
 
             while (remaining.len >= VLen) {
                 const chunkVec: Chunk = remaining[0..VLen].*;
-
-                if (@reduce(.Min, chunkVec) == '\x00') {
+                const mask: Chunk = @splat('\x00');
+                const matches = chunkVec == mask;
+                if (@reduce(.Or, matches))
                     return true;
-                }
+
                 remaining = remaining[VLen..];
             }
         }
@@ -301,7 +286,7 @@ pub const GrowingLineReader = struct {
                 if (reader.bufferedLen() == 0) return .eof;
                 const slice = reader.buffered();
                 reader.toss(slice.len);
-                return .{ .eofChunk = slice };
+                return .{ .line = slice };
             },
             std.Io.Reader.DelimiterError.StreamTooLong => {
                 const targetSize = reader.buffer.len * self.growthFactor;
@@ -424,14 +409,6 @@ pub const Source = struct {
         switch (self.sourceReader) {
             inline else => |source| {
                 return try source.loadSource(fDetailed);
-            },
-        }
-    }
-
-    pub fn nextLine(self: *@This()) ReadEvent.Error!ReadEvent {
-        switch (self.sourceReader) {
-            inline else => |source| {
-                return try source.nextLine();
             },
         }
     }

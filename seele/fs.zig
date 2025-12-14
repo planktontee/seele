@@ -204,12 +204,6 @@ pub const FileCursor = struct {
                 .file,
                 => {
                     if (stat.size == 0) continue;
-                    _ = std.os.linux.fadvise(
-                        f.handle,
-                        0,
-                        @bitCast(stat.size),
-                        c.POSIX_FADV_SEQUENTIAL,
-                    );
                     self.current = try DetailedFile.from(
                         f,
                         if (self.walker != null) self.fileArgsOpt.?[self.idx] else "",

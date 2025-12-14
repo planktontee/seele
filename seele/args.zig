@@ -377,11 +377,26 @@ pub const Args = struct {
         unreachable;
     }
 
-    pub fn compileOptions(self: *const @This()) regex.CompileOptions {
+    pub fn compileOptions(
+        self: *const @This(),
+        eventHandlerT: sink.EventHanderT,
+    ) regex.CompileOptions {
         return .{
             .flags = .{
                 .caseless = self.@"ignore-case",
                 .noUTFCheck = self.@"validate-utf8",
+                // NOTE:
+                // this will skip groups and save quite a bit of time
+                .noAutoCapture = switch (eventHandlerT) {
+                    .matchInLine,
+                    .matchOnly,
+                    => !self.@"group-highlight" and self.groups == .zero,
+                    .groupOnly,
+                    => false,
+                    .lineOnMatch,
+                    .nonMatchingLine,
+                    => true,
+                },
             },
             .extraFlags = .{
                 .matchWord = self.@"word-match",

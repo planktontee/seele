@@ -8,7 +8,7 @@ pub fn build(b: *std.Build) !void {
         .root_source_file = b.path("seele.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = true,
+        .omit_frame_pointer = optimize == .ReleaseFast,
     });
     module.addImport("regent", b.dependency("regent", .{
         .target = target,
@@ -23,6 +23,7 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
         .support_jit = true,
+        .linkage = .static,
     });
 
     // TODO: find a better way of doing this

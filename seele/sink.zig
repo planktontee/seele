@@ -33,17 +33,9 @@ pub const EventHandler = union(enum) {
     lineOnMatch: LineOnMatch,
     nonMatchingLine: NonMatchingLine,
 
-    pub fn handle(
-        self: *@This(),
-    ) Sink.ConsumeError!Sink.ConsumeResponse {
-        switch (self.*) {
-            inline else => |*handler| return try handler.handle(),
-        }
-    }
-
-    pub fn hasColor(self: *@This()) bool {
+    pub fn hasColor(self: *const @This()) bool {
         return switch (self.*) {
-            inline else => |*handler| handler.colorPicker.colorPattern != .noColor,
+            inline else => |handler| handler.colorPicker.colorPattern != .noColor,
         };
     }
 
@@ -74,12 +66,6 @@ pub const EventHandler = union(enum) {
                 try Context.instance.stderrW.writeVecAll(vec);
             },
         }
-    }
-
-    pub fn uses(self: *const @This(), comptime eventT: EventT) bool {
-        return switch (self.*) {
-            inline else => |handler| @TypeOf(handler).uses(eventT),
-        };
     }
 };
 
@@ -635,8 +621,8 @@ pub const Mode = enum {
 pub const Sink = struct {
     fileType: fs.FileType,
     eventHandler: EventHandler,
-    colorEnabled: bool = false,
     sinkWriter: SinkWriter,
+    hasColor: bool,
 
     pub fn init(
         self: *@This(),
@@ -657,6 +643,7 @@ pub const Sink = struct {
                 eventHandler,
                 argsRes.options.@"line-number",
             ),
+            .hasColor = eventHandler.hasColor(),
         };
     }
 
@@ -668,42 +655,31 @@ pub const Sink = struct {
     pub fn writeVecAll(self: *@This(), comptime validate: bool) SinkWriteError!void {
         const data: [][]const u8 = Context.getSlices();
         if (comptime validate) {
-            const hasColor = self.eventHandler.hasColor();
             var i: usize = data.len;
+            const step: usize = if (self.hasColor) 2 else 1;
 
-            while (i > Context.buffAt) {
+            while (i > Context.buffAt) : (i -|= step) {
                 if (!std.unicode.utf8ValidateSlice(data[i - 1]))
                     return SinkWriteError.BadUTF8Encoding;
-
-                i -= if (hasColor) rv: {
-                    break :rv if (i >= 2) 2 else 1;
-                } else 1;
             }
         }
 
         switch (self.sinkWriter) {
             .growing,
-            => |w| {
-                try w.writer().writeVecAll(data);
-            },
+            => |w| try w.writer().writeVecAll(data),
             .buffered,
             .directWrite,
-            => |*w| {
-                try w.interface.writeVecAll(data);
-            },
+            => |*w| try w.interface.writeVecAll(data),
         }
     }
 
     pub fn sinkLine(self: *@This()) Writer.Error!void {
-        // TODO: do I need a flush strategy too?
         switch (self.fileType) {
             .tty => {
                 switch (self.sinkWriter) {
                     .growing => |alloc| try alloc.flush(),
-                    .buffered,
-                    => |*w| try w.interface.flush(),
-                    .directWrite,
-                    => {},
+                    .buffered => |*w| try w.interface.flush(),
+                    .directWrite => {},
                 }
             },
             else => {},
@@ -720,8 +696,7 @@ pub const Sink = struct {
 
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         switch (self.sinkWriter) {
-            .growing,
-            => |w| w.deinit(allocator),
+            .growing => |w| w.deinit(allocator),
             .buffered,
             .directWrite,
             => |*w| {
@@ -754,15 +729,18 @@ pub const Sink = struct {
         }
     };
 
-    pub fn consume(self: *@This(), comptime mode: Mode) ConsumeError!ConsumeResponse {
+    pub fn consume(self: *@This(), comptime mode: Mode, comptime HandlerT: type) ConsumeError!ConsumeResponse {
         if (comptime mode == .release) {
-            return self.innerConsume() catch |e| switch (e) {
-                SinkWriteError.BadUTF8Encoding => {
-                    Context.event = .eof;
-                    _ = try self.innerConsume();
-                    return e;
-                },
-                else => return e,
+            return self.innerConsume(HandlerT) catch |e| {
+                @branchHint(.cold);
+                switch (e) {
+                    SinkWriteError.BadUTF8Encoding => {
+                        Context.event = .eof;
+                        _ = try self.innerConsume(HandlerT);
+                        return e;
+                    },
+                    else => return e,
+                }
             };
         }
 
@@ -780,7 +758,7 @@ pub const Sink = struct {
         // We need to ensure colors make sense always
         try stderrW.flush();
 
-        const result = self.innerConsume() catch |e| {
+        const result = self.innerConsume(HandlerT) catch |e| {
             try stderrW.writeAll(colorPicker.colorPattern.reset());
             try stderrW.print("Err┊ {s}\n", .{@errorName(e)});
 
@@ -804,8 +782,14 @@ pub const Sink = struct {
         return result;
     }
 
-    pub fn innerConsume(self: *@This()) ConsumeError!ConsumeResponse {
-        return try self.eventHandler.handle();
+    pub fn innerConsume(self: *@This(), comptime HandlerT: type) ConsumeError!ConsumeResponse {
+        const activeTag = comptime rv: {
+            for (@typeInfo(EventHandler).@"union".fields) |f| {
+                if (f.type == HandlerT) break :rv f.name;
+            } else @compileError("Bad event handler");
+        };
+
+        return try @field(self.eventHandler, activeTag).handle();
     }
 };
 
@@ -841,7 +825,7 @@ pub const GroupOnly = struct {
     }
 
     pub fn uses(comptime eventT: EventT) bool {
-        return switch (eventT) {
+        return comptime switch (eventT) {
             .afterMatch,
             .noMatch,
             .excludedGroup,
@@ -882,11 +866,16 @@ pub const GroupOnly = struct {
                     matchEvent.group.n,
                 );
 
-                chunks.coloredChunk(matchEvent.group.slice(Context.baseEvent.line));
+                const slice = matchEvent.group.slice(Context.baseEvent.line);
+                chunks.coloredChunk(slice);
                 if (matchEvent.hasMore)
                     chunks.clearChunk(self.delimiter)
-                else
-                    chunks.breakline();
+                else {
+                    if (slice.len > 0 and slice[slice.len - 1] != '\n')
+                        chunks.breakline()
+                    else
+                        chunks.skipChunk();
+                }
 
                 try Context.sinkp.writeVecAll(true);
 
@@ -932,7 +921,7 @@ pub const MatchOnly = struct {
     }
 
     pub fn uses(comptime eventT: EventT) bool {
-        return switch (eventT) {
+        return comptime switch (eventT) {
             .afterMatch,
             .noMatch,
             .emptyGroup,
@@ -1064,7 +1053,7 @@ pub const NonMatchingLine = struct {
     }
 
     pub fn uses(comptime eventT: EventT) bool {
-        return switch (eventT) {
+        return comptime switch (eventT) {
             else => true,
         };
     }
@@ -1125,7 +1114,7 @@ pub const LineOnMatch = struct {
     }
 
     pub fn uses(comptime eventT: EventT) bool {
-        return switch (eventT) {
+        return comptime switch (eventT) {
             .beforeGroup,
             .afterMatch,
             .noMatch,
@@ -1186,7 +1175,7 @@ pub const MatchInLine = struct {
     }
 
     pub fn uses(comptime eventT: EventT) bool {
-        return switch (eventT) {
+        return comptime switch (eventT) {
             .excludedGroup,
             .noMatch,
             => false,
@@ -1259,40 +1248,44 @@ pub const MatchInLine = struct {
     }
 
     pub fn showPrefixes(self: anytype) Sink.ConsumeError!void {
-        // NOTE: this is fine because we move away from direct io in case showLines is used
         const lineN = Context.baseEvent.lineN;
-        if (self.lastLine != lineN) {
-            if (self.fDetailed) |fDetailed| {
-                var chunks = self.colorPicker.chunks(4, 0);
-                chunks.forceColoredChunk(
-                    tty.EscapeColor.magenta.escapeCode(),
-                    fDetailed.path[0],
-                );
-                chunks.forceChunk(fDetailed.path[1]);
-                chunks.forceChunk(fDetailed.path[2]);
-                chunks.forceColoredChunk(
-                    tty.EscapeColor.reset.escapeCode(),
-                    self.prefixDelimiter(),
-                );
-                _ = self.colorPicker.reset();
 
-                Context.buffAt = Context.slices.len;
-                self.lastLine = lineN;
-            }
+        if (self.lastLine == lineN) return;
 
-            if (self.showLines) {
-                var chunks = self.colorPicker.chunks(2, 0);
-                const lineNStr = try std.fmt.bufPrint(&Context.lineNBuff, "{d}", .{lineN});
-                chunks.forceColoredChunk(tty.EscapeColor.green.escapeCode(), lineNStr);
-                chunks.forceColoredChunk(
-                    tty.EscapeColor.reset.escapeCode(),
-                    self.prefixDelimiter(),
-                );
-                _ = self.colorPicker.reset();
+        if (self.fDetailed) |fDetailed| {
+            var chunks = self.colorPicker.chunks(4, 0);
+            chunks.forceColoredChunk(
+                tty.EscapeColor.magenta.escapeCode(),
+                fDetailed.path[0],
+            );
+            chunks.forceChunk(fDetailed.path[1]);
+            chunks.forceChunk(fDetailed.path[2]);
+            chunks.forceColoredChunk(
+                tty.EscapeColor.reset.escapeCode(),
+                self.prefixDelimiter(),
+            );
+            _ = self.colorPicker.reset();
 
-                Context.buffAt = Context.slices.len;
-                self.lastLine = lineN;
-            }
+            Context.buffAt = Context.slices.len;
+            self.lastLine = lineN;
+        }
+
+        if (self.showLines) {
+            var chunks = self.colorPicker.chunks(2, 0);
+            const lineNStr = try std.fmt.bufPrint(
+                &Context.lineNBuff,
+                "{d}",
+                .{lineN},
+            );
+            chunks.forceColoredChunk(tty.EscapeColor.green.escapeCode(), lineNStr);
+            chunks.forceColoredChunk(
+                tty.EscapeColor.reset.escapeCode(),
+                self.prefixDelimiter(),
+            );
+            _ = self.colorPicker.reset();
+
+            Context.buffAt = Context.slices.len;
+            self.lastLine = lineN;
         }
     }
 
@@ -1341,7 +1334,7 @@ pub const MatchInLine = struct {
 
         defer Context.buffAt = 0;
         try self.showPrefixes();
-        try self.writeClear(&.{line[group.start]});
+        try self.writeClear(line[group.start .. group.start + 1]);
         return .consumed;
     }
 

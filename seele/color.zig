@@ -136,26 +136,9 @@ pub const ColoredChunks = struct {
         self.at += 2;
     }
 
-    // crawls all chunks to see if there's a breakline already in there before all
-    // skipped chunks
     pub fn breakline(self: *@This()) void {
         assert(self.at + 2 == Context.slices.len);
-        if (self.at == 0 or Context.slices.len <= 2) {
-            self.add("\n");
-            return;
-        }
-        assert(Context.slices.len >= 3);
-
-        // [-3]<text> [-2]<color> [-1]<text>$
-        var chunk = Context.slices.len - 3;
-        // this if fine because [0] is color
-        while (chunk > 0) : (chunk -|= 2) {
-            const last = Context.slices[chunk];
-            if (last.len == 0) continue;
-
-            self.add(if (last.len > 0 and last[last.len - 1] != '\n') "\n" else "");
-            return;
-        }
+        self.add("\n");
     }
 
     pub fn add(self: *@This(), chunk: []const u8) void {
@@ -195,19 +178,7 @@ pub const UncoloredChunks = struct {
 
     pub fn breakline(self: *@This()) void {
         assert(self.at + 1 == Context.slices.len);
-        if (self.at == 0 or Context.slices.len <= 1) {
-            self.clearChunk("\n");
-            return;
-        }
-        assert(Context.slices.len >= 1);
-
-        for (0..self.at) |offset| {
-            const last = Context.slices[self.at - 1 - offset];
-            if (last.len == 0) continue;
-
-            self.clearChunk(if (last.len > 0 and last[last.len - 1] != '\n') "\n" else "");
-            return;
-        }
+        self.clearChunk("\n");
     }
 };
 

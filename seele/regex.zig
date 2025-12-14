@@ -141,14 +141,23 @@ pub const Regex = struct {
             switch (rc) {
                 // NOTE: this implies ovector is not big enough for all substr
                 // matches
-                0 => return MatchError.MatchDataTooBig,
-                c.PCRE2_ERROR_NOMATCH => return MatchError.NoMatch,
+                0 => {
+                    @branchHint(.cold);
+                    return MatchError.MatchDataTooBig;
+                },
+                c.PCRE2_ERROR_NOMATCH => {
+                    @branchHint(.unpredictable);
+                    return MatchError.NoMatch;
+                },
                 // -23 ... -3
-                c.PCRE2_ERROR_UTF8_ERR21...c.PCRE2_ERROR_UTF8_ERR1 => return MatchError.BadUTF8Encode,
+                c.PCRE2_ERROR_UTF8_ERR21...c.PCRE2_ERROR_UTF8_ERR1 => {
+                    @branchHint(.unlikely);
+                    return MatchError.BadUTF8Encode;
+                },
                 // NOTE: most error are data related or group related or utf related
                 // check the ERROR definition in the lib
                 else => {
-                    @branchHint(.unlikely);
+                    @branchHint(.cold);
                     return MatchError.UnknownError;
                 },
             }
@@ -201,7 +210,7 @@ pub const RegexMatch = struct {
         assert(slice.len / 2 <= std.math.maxInt(u16));
         return .{
             .ovector = slice,
-            .count = @intCast(slice.len / 2),
+            .count = @intCast(length),
         };
     }
 
