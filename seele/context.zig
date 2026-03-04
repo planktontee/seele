@@ -84,6 +84,10 @@ pub fn getSlices() [][]const u8 {
     return @This().chunksBuff[0 .. @This().buffAt + @This().slices.len];
 }
 
+pub fn consumeSlices() void {
+    @This().buffAt += @This().slices.len;
+}
+
 pub var sinkp: sink.Sink = undefined;
 
 pub var argsRes: *const ArgsRes = undefined;

@@ -1248,10 +1248,12 @@ pub const MatchInLine = struct {
     }
 
     pub fn showPrefixes(self: anytype) Sink.ConsumeError!void {
+        assert(Context.buffAt == 0);
         const lineN = Context.baseEvent.lineN;
 
         if (self.lastLine == lineN) return;
 
+        var buffSize: usize = 0;
         if (self.fDetailed) |fDetailed| {
             var chunks = self.colorPicker.chunks(4, 0);
             chunks.forceColoredChunk(
@@ -1266,7 +1268,11 @@ pub const MatchInLine = struct {
             );
             _ = self.colorPicker.reset();
 
-            Context.buffAt = Context.slices.len;
+            Context.consumeSlices();
+
+            assert(Context.buffAt == buffSize + Context.slices.len);
+            buffSize = Context.slices.len;
+
             self.lastLine = lineN;
         }
 
@@ -1284,7 +1290,8 @@ pub const MatchInLine = struct {
             );
             _ = self.colorPicker.reset();
 
-            Context.buffAt = Context.slices.len;
+            Context.consumeSlices();
+            assert(Context.buffAt == buffSize + Context.slices.len);
             self.lastLine = lineN;
         }
     }
