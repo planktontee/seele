@@ -5,12 +5,13 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const args = @import("args.zig");
 const units = @import("regent").units;
-const File = std.fs.File;
+const File = std.Io.File;
 const Reader = std.Io.Reader;
+const Context = @import("context.zig");
 
 pub const DetectTypeError = error{
     UnreadableFileType,
-};
+} || std.Io.Cancelable;
 
 pub const FileType = enum {
     tty,
@@ -22,7 +23,7 @@ pub const FileType = enum {
 pub fn detectType(file: File, stat: *const File.Stat) DetectTypeError!FileType {
     switch (stat.kind) {
         .character_device => {
-            return if (file.isTty()) .tty else .characterDevice;
+            return if (try file.isTty(Context.io)) .tty else .characterDevice;
         },
         .file => return .file,
         .named_pipe => return .pipe,
@@ -62,7 +63,7 @@ pub const DetailedFile = struct {
         file: File,
         baseDir: []const u8,
         filePath: []const u8,
-        stat: *const std.fs.File.Stat,
+        stat: *const std.Io.File.Stat,
     ) DetectTypeError!@This() {
         const fileType = try detectType(file, stat);
         return .{
@@ -81,9 +82,9 @@ pub const DetailedFile = struct {
 
 pub const ActivateFile = struct {
     path: []const u8,
-    file: std.fs.File,
+    file: std.Io.File,
 
-    pub fn init(path: []const u8, file: std.fs.File) @This() {
+    pub fn init(path: []const u8, file: std.Io.File) @This() {
         return .{
             .path = path,
             .file = file,
@@ -96,7 +97,7 @@ pub const FileCursor = struct {
     stdinFilled: bool = true,
     current: ?DetailedFile = null,
     idx: usize = 0,
-    walker: ?std.fs.Dir.Walker = null,
+    walker: ?std.Io.Dir.Walker = null,
     recursive: bool = false,
 
     pub fn init(argsRes: *const args.ArgsRes, recursive: bool) @This() {
@@ -109,21 +110,21 @@ pub const FileCursor = struct {
     pub const OpenError = error{
         InvalidFileType,
     } ||
-        std.fs.File.OpenError ||
-        std.fs.File.StatError ||
+        std.Io.File.OpenError ||
+        std.Io.File.StatError ||
         Allocator.Error ||
         DetectTypeError ||
-        std.posix.RealPathError;
+        std.Io.Dir.RealPathError;
 
     fn nextFd(self: *@This()) OpenError!?ActivateFile {
         if (self.stdinFilled and self.fileArgsOpt == null)
             return .init(
                 "(standard input)",
-                std.fs.File.stdin(),
+                std.Io.File.stdin(),
             );
 
         if (self.walker) |*walker| {
-            while (try walker.next()) |entry| {
+            while (try walker.next(Context.io)) |entry| {
                 switch (entry.kind) {
                     .character_device,
                     .named_pipe,
@@ -132,6 +133,7 @@ pub const FileCursor = struct {
                         return .init(
                             entry.path,
                             try entry.dir.openFile(
+                                Context.io,
                                 entry.basename,
                                 .{ .mode = .read_only },
                             ),
@@ -153,22 +155,25 @@ pub const FileCursor = struct {
             if (target.len == 1 and target[0] == '-') {
                 return .init(
                     "(standard input)",
-                    std.fs.File.stdin(),
+                    std.Io.File.stdin(),
                 );
             } else {
-                const path = if (std.fs.path.isAbsolute(target))
+                const path = if (std.Io.Dir.path.isAbsolute(target))
                     target
                 else rv: {
                     var buff: [4096]u8 = undefined;
-                    break :rv try std.fs.cwd().realpath(
+                    const readN = try std.Io.Dir.cwd().realPathFile(
+                        Context.io,
                         target,
                         &buff,
                     );
+                    break :rv buff[0..readN];
                 };
 
                 return .init(
                     target,
-                    try std.fs.openFileAbsolute(
+                    try std.Io.Dir.openFileAbsolute(
+                        Context.io,
                         path,
                         .{ .mode = .read_only },
                     ),
@@ -186,7 +191,7 @@ pub const FileCursor = struct {
             const path = activeFile.path;
             const f = activeFile.file;
 
-            const stat = try f.stat();
+            const stat = try f.stat(Context.io);
 
             switch (stat.kind) {
                 .character_device,
@@ -218,7 +223,7 @@ pub const FileCursor = struct {
                 => {
                     if (!self.recursive) return OpenError.InvalidFileType;
 
-                    var dir: std.fs.Dir = .{ .fd = f.handle };
+                    var dir: std.Io.Dir = .{ .handle = f.handle };
                     self.walker = try dir.walk(allocator);
                     continue;
                 },
@@ -245,7 +250,7 @@ pub const FileCursor = struct {
 
     pub fn closeCurrent(self: *@This()) void {
         assert(self.current != null);
-        self.current.?.file.close();
+        self.current.?.file.close(Context.io);
         self.current = null;
         if (self.stdinFilled)
             self.stdinFilled = false
@@ -258,7 +263,7 @@ pub const FileCursor = struct {
     pub fn deinit(self: *@This()) void {
         if (builtin.mode != .Debug) return;
 
-        if (self.current) |detailedFile| detailedFile.file.close();
+        if (self.current) |detailedFile| detailedFile.file.close(Context.io);
         if (self.walker) |*walker| walker.deinit();
     }
 };

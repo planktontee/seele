@@ -6,7 +6,7 @@ const fs = @import("fs.zig");
 const args = @import("args.zig");
 const regex = @import("regex.zig");
 const tty = @import("tty.zig");
-const File = std.fs.File;
+const File = std.Io.File;
 const Writer = std.Io.Writer;
 const color = @import("color.zig");
 const ColorPicker = color.ColorPicker;
@@ -389,8 +389,8 @@ pub const Event = union(enum) {
             // NOTE: this will be incredibly wasteful
             // move to sink later as part of the trace mode
             const fileType: fs.FileType = rv: {
-                const stderrFd = std.fs.File.stderr();
-                const stat = stderrFd.stat() catch break :rv .file;
+                const stderrFd = std.Io.File.stderr();
+                const stat = stderrFd.stat(Context.io) catch break :rv .file;
                 const detailedFile = fs.DetailedFile.from(
                     stderrFd,
                     "",
@@ -530,7 +530,7 @@ pub const Event = union(enum) {
 // Allocating doesnt accept chaining
 pub const GrowingWriter = struct {
     allocating: std.Io.Writer.Allocating,
-    fdWriter: std.fs.File.Writer,
+    fdWriter: std.Io.File.Writer,
 
     pub fn flush(self: *@This()) Writer.Error!void {
         const buff = self.allocating.writer.buffered();
@@ -584,8 +584,8 @@ pub const SinkWriter = union(SinkBufferT) {
 
                 const allocating = try std.Io.Writer.Allocating.initCapacity(allocator, size);
                 const writer = switch (fDetailed.accessType) {
-                    .streaming => fDetailed.file.writerStreaming(&.{}),
-                    .positional => fDetailed.file.writer(&.{}),
+                    .streaming => fDetailed.file.writerStreaming(Context.io, &.{}),
+                    .positional => fDetailed.file.writer(Context.io, &.{}),
                 };
 
                 growing.* = .{
@@ -597,15 +597,15 @@ pub const SinkWriter = union(SinkBufferT) {
             .buffered => |size| rv: {
                 const buff = try allocator.alloc(u8, size);
                 const writer = switch (fDetailed.accessType) {
-                    .streaming => fDetailed.file.writerStreaming(buff),
-                    .positional => fDetailed.file.writer(buff),
+                    .streaming => fDetailed.file.writerStreaming(Context.io, buff),
+                    .positional => fDetailed.file.writer(Context.io, buff),
                 };
                 break :rv .{ .buffered = writer };
             },
             .directWrite => rv: {
                 const writer = switch (fDetailed.accessType) {
-                    .streaming => fDetailed.file.writerStreaming(&.{}),
-                    .positional => fDetailed.file.writer(&.{}),
+                    .streaming => fDetailed.file.writerStreaming(Context.io, &.{}),
+                    .positional => fDetailed.file.writer(Context.io, &.{}),
                 };
                 break :rv .{ .directWrite = writer };
             },
@@ -710,7 +710,7 @@ pub const Sink = struct {
 
     pub const ConsumeError = error{} ||
         SinkWriteError ||
-        std.fs.File.WriteError ||
+        std.Io.File.Writer.WriteFileError ||
         Writer.Error;
 
     pub const ConsumeResponse = union(enum) {

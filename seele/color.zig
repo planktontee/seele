@@ -37,8 +37,8 @@ pub const ColorPicker = struct {
     pub fn hasTrueColor(colorPattern: tty.ColorPattern) bool {
         if (colorPattern == .noColor) return false;
 
-        if (std.posix.getenv("COLORTERM")) |colorterm| {
-            return std.mem.eql(u8, colorterm, "truecolor");
+        if (std.posix.system.getenv("COLORTERM")) |colorterm| {
+            return std.mem.eql(u8, std.mem.span(colorterm), "truecolor");
         }
         return false;
     }

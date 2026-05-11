@@ -1,20 +1,20 @@
 .{
     .name = .seeksub,
-    .version = "0.0.0",
+    .version = "0.0.1",
     .fingerprint = 0x26358d0de677914,
-    .minimum_zig_version = "0.15.1",
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .pcre2 = .{
-            .url = "git+https://github.com/PCRE2Project/pcre2/#3b9197727e70bffded674d24100e7b4c80e7ef58",
-            .hash = "N-V-__8AAKXw4QA1Yjp7IiVBtaJMxAkMY99mZhb-mrxrmELA",
+            .url = "git+https://github.com/PCRE2Project/pcre2/#4f460e5edaa698bda57a93e044ca811fe64e93f8",
+            .hash = "N-V-__8AAGky4wCKqMIU7GBaqSv5d0p7hxHK4jVHts6q5l63",
         },
         .regent = .{
-            .url = "git+https://github.com/planktontee/regent/#7f8925233a23405a9529416e6dadee1c5fd7c953",
-            .hash = "regent-0.0.1-zgdbw-cuAAAqyrK_MdAT1upi5_SvkOAJuE4L7ctd4xyn",
+            .url = "git+https://github.com/planktontee/regent.git#edd61f590999adc4468ea1bd64a8fb87389bcc89",
+            .hash = "regent-0.0.1-zgdbw5M0AADMnI5YAFbqNkh9dCJ_sWOM7USTQrghPUxL",
         },
         .zcasp = .{
-            .url = "git+https://github.com/planktontee/zcasp/#3a4d5b956cfdd556ab3f5e8726a2348b357cff01",
-            .hash = "zcasp-0.0.1-iIb82Lc3AwBA6fFuRrJDeRVWtlfxpSqRhkhC5WDewl2j",
+            .url = "git+https://github.com/planktontee/zcasp.git#997d6f2c4a4efe45063e5da8aeb762e31d202aec",
+            .hash = "zcasp-0.0.1-iIb82KFQAwAMCmkyFhy-GfOagboPqAIxegUYbvS9l_eV",
         },
         .sljit = .{
             .url = "git+https://github.com/zherczeg/sljit#8d40e0306aacca3596f64a338b5033d2050fc20e",

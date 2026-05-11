@@ -45,7 +45,7 @@ pub fn build(b: *std.Build) !void {
             sljitPathTarget,
         },
         &rCode,
-        .Close,
+        .close,
     ) catch {};
     _ = pcre2_dep.builder.runAllowFail(
         &.{
@@ -55,7 +55,7 @@ pub fn build(b: *std.Build) !void {
             sljitPathTarget,
         },
         &rCode,
-        .Close,
+        .close,
     ) catch {};
     module.linkLibrary(pcre2_dep.artifact("pcre2-8"));
 

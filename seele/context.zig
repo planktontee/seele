@@ -2,7 +2,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const builtin = @import("builtin");
 const mem = @import("mem.zig");
-const FileWriter = std.fs.File.Writer;
+const FileWriter = std.Io.File.Writer;
 const Writer = std.Io.Writer;
 const Allocator = std.mem.Allocator;
 const DebugAlloc = std.heap.DebugAllocator(.{
@@ -64,6 +64,8 @@ pub fn deinit(self: *@This()) void {
     }
 }
 
+pub var io: std.Io = undefined;
+pub var args: std.process.Args = undefined;
 pub var usingStack: bool = false;
 
 pub var instance: *@This() = undefined;

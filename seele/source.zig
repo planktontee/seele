@@ -4,7 +4,7 @@ const units = @import("regent").units;
 const fs = @import("fs.zig");
 const c = @import("c.zig").c;
 const Context = @import("context.zig");
-const File = std.fs.File;
+const File = std.Io.File;
 const Reader = std.Io.Reader;
 const Writer = std.Io.Writer;
 
@@ -112,7 +112,7 @@ pub const MmapLineReader = struct {
         const ptr = try std.posix.mmap(
             null,
             @intCast(fDetailed.stat.size),
-            std.posix.PROT.READ,
+            .{ .READ = true },
             .{
                 .TYPE = .PRIVATE,
                 .NONBLOCK = true,
@@ -264,8 +264,8 @@ pub const GrowingLineReader = struct {
 
     pub inline fn newReader(self: *@This(), buff: []u8, fDetailed: *const fs.DetailedFile) void {
         self.fsReader = switch (fDetailed.accessType) {
-            .streaming => fDetailed.file.readerStreaming(buff),
-            .positional => fDetailed.file.reader(buff),
+            .streaming => fDetailed.file.readerStreaming(Context.io, buff),
+            .positional => fDetailed.file.reader(Context.io, buff),
         };
         self.fileValidatorR = .init(&self.fsReader.interface);
     }

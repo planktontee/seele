@@ -16,9 +16,13 @@ const DebugAlloc = std.heap.DebugAllocator(.{
     .safety = true,
 });
 
-pub fn main() !u8 {
+pub fn main(init: std.process.Init.Minimal) !u8 {
     var ctx: Context = undefined;
     Context.instance = &ctx;
+
+    var tIo = std.Io.Threaded.init_single_threaded;
+    Context.io = tIo.io();
+    Context.args = init.args;
 
     const rlimit = try std.posix.getrlimit(.STACK);
     const currMb = rlimit.cur / units.ByteUnit.mb;
@@ -55,7 +59,7 @@ pub fn main() !u8 {
             512 * units.ByteUnit.kb,
         );
 
-        var stderrW = std.fs.File.stderr().writerStreaming(stderrWBuff);
+        var stderrW = std.Io.File.stderr().writerStreaming(Context.io, stderrWBuff);
         Context.instance.init(
             null,
             heapAlloc,
@@ -118,7 +122,7 @@ pub fn stackBufferTrampoline(comptime size: usize) !RunReturn {
         512 * units.ByteUnit.kb,
     );
 
-    var stderrW = std.fs.File.stderr().writerStreaming(stderrWBuff);
+    var stderrW = std.Io.File.stderr().writerStreaming(Context.io, stderrWBuff);
     Context.instance.init(
         scrapSize,
         scrapAlloc,
@@ -136,7 +140,7 @@ pub fn handleArgsAndRun() !RunReturn {
     var argsRes: args.ArgsRes = .init(Context.instance.scrapAlloc);
     defer if (builtin.mode == .Debug) argsRes.deinit();
 
-    if (argsRes.parseArgs()) |err| {
+    if (argsRes.parseArgs(Context.args)) |err| {
         if (err.message) |message| {
             try Context.instance.stderrW.print("Last opt <{?s}>, Last token <{?s}>. ", .{
                 err.lastOpt,
@@ -202,12 +206,12 @@ pub fn run(comptime mode: sink.Mode) RunError!RunReturn {
     var fSource: source.Source = undefined;
     defer if (!firstMissing) fSource.deinit(Context.instance.inAlloc);
 
-    const stdoutFd = std.fs.File.stdout();
+    const stdoutFd = std.Io.File.stdout();
     const stdout = try fs.DetailedFile.from(
         stdoutFd,
         "",
         "(stdout)",
-        &(try stdoutFd.stat()),
+        &(try stdoutFd.stat(Context.io)),
     );
 
     try Context.sinkp.init(
