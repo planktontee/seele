@@ -159,7 +159,7 @@ pub const Args = struct {
     @"group-only": bool = false,
 
     groups: TargetGroup = .zero,
-    @"group-delimiter": u8 = '\n',
+    @"group-delimiter": []const u8 = "\n",
 
     @"ignore-case": bool = false,
     @"word-match": bool = false,
@@ -170,16 +170,13 @@ pub const Args = struct {
     @"skip-binary": bool = false,
     @"validate-utf8": bool = false,
 
-    multiline: bool = false,
     recursive: bool = false,
-    @"follow-links": bool = false,
 
     color: ?bool = null,
     @"group-highlight": bool = false,
 
     trace: bool = false,
     verbose: bool = false,
-    byteRanges: ?[]const []const usize = null,
 
     pub const Codec = ArgsCodec;
 
@@ -206,144 +203,62 @@ pub const Args = struct {
         .vB = .@"skip-binary",
         .vU = .@"validate-utf8",
 
-        .mL = .multiline,
         .R = .recursive,
-        .fL = .@"follow-links",
 
         .gH = .@"group-highlight",
-
-        .bR = .byteRanges,
     };
 
-    pub const Verb = union(enum) {
-        match: Match,
-        diff: Diff,
-        apply: Apply,
-    };
+    pub fn validate(fbset: zcasp.validate.FieldBitSet(@This())) zcasp.validate.Error!void {
+        if (fbset.allOf(.{ .@"match-only", .@"group-only" })) return error.MutuallyExclusiveArgsPresent;
+
+        if (fbset.oneOf(.{.@"invert-match"}))
+            if (fbset.oneOf(.{ .@"match-only", .@"group-only" }))
+                return error.MutuallyExclusiveArgsPresent;
+
+        if (fbset.oneOf(.{.@"group-delimiter"}))
+            if (!fbset.allOf(.{.@"group-only"}))
+                return error.MutualArgsMissing;
+    }
 
     pub const GroupMatch: GroupMatchConfig(@This()) = .{
-        // TODO: rethink groupmatching to allow defaults and checks to play together
-        // .mutuallyExclusive = &.{
-        //     &.{ .byteRanges, .@"line-by-line", .multiline },
-        // },
-        //
-        // One-way inclusive:
-        // --groups -> --group-highlight
-        //
+        .validateFn = @This().validate,
     };
 
     pub const Help: HelpData(@This()) = .{
-        .usage = &.{"seeksub <options> <command> ... <pattern> <files>"},
-        .description = "CLI tool to match, diff and apply regex in bulk using PCRE2. One of the main features of this CLI is the ability to seek byte ranges before matching or replacing",
+        .usage = &.{"seeksub <options> ... <pattern> <files>"},
+        .description = "CLI tool to run PCRE2 regex matches on files.",
         .optionsDescription = &.{
-            .{ .field = .@"line-by-line", .description = "Line by line matching" },
-            .{ .field = .@"invert-match", .description = "Invest matches, color wont be applied" },
-            .{ .field = .@"match-only", .description = "Display only matched text" },
-            .{ .field = .@"group-only", .description = "Display only groups matched, split by delimiter, see --group-delimiter." },
+            .{ .field = .@"line-by-line", .description = "Line by line matching." },
+            .{ .field = .@"invert-match", .description = "Inverts matches, color wont be applied. Excludes --match-only, --group-only." },
+            .{ .field = .@"match-only", .description = "Display only matched text. Excludes --invert-match, --group-only." },
+            .{ .field = .@"group-only", .description = "Display only groups matched, split by delimiter, see --group-delimiter. Excludes --invert-match, --match-only." },
 
             .{ .field = .groups, .typeHint = false, .defaultHint = false, .description = "Pick group numbers to be colored, or if -O is used, to be displayed. Examples: '0'; '1..10'; '1,3..5,7'" },
-            .{ .field = .@"group-delimiter", .description = "Change group delimiter for --group-only" },
+            .{ .field = .@"group-delimiter", .description = "Change group delimiter. Requires --group-only." },
 
-            .{ .field = .@"ignore-case", .description = "Ignore case regex flag" },
+            .{ .field = .@"ignore-case", .description = "Ignore case regex flag." },
             .{ .field = .@"word-match", .description = "Match strings that have word boundary at start and end" },
-            .{ .field = .@"line-number", .description = "Shows line number" },
-            .{ .field = .@"no-file-name", .description = "Suppress file name on output" },
+            .{ .field = .@"line-number", .description = "Shows line number." },
+            .{ .field = .@"no-file-name", .description = "Suppress file name on output." },
             .{ .field = .@"match-max", .defaultHint = false, .description = "Match at most n number of matches." },
 
-            .{ .field = .@"skip-binary", .description = "Skip binary files (this requires all bytes to be checked)" },
-            .{ .field = .@"validate-utf8", .description = "Validate ut8 (this requires all bytes to be checked)" },
+            .{ .field = .@"skip-binary", .description = "Skip binary files (this requires all bytes to be checked)." },
+            .{ .field = .@"validate-utf8", .description = "Validate ut8 (this requires all bytes to be checked)." },
 
-            .{ .field = .multiline, .description = "Multiline matching" },
-            .{ .field = .recursive, .description = "Recursively matches all files in paths" },
-            .{ .field = .@"follow-links", .description = "Follow symlinks, using a weakref visitor" },
+            .{ .field = .recursive, .description = "Recursively matches all files in paths." },
 
-            .{ .field = .color, .description = "Colors matches" },
-            .{ .field = .@"group-highlight", .description = "Uses a color table for each group match, this will also only color group matches other than 0 unless overriden with --groups" },
+            .{ .field = .color, .description = "Colors matches." },
+            .{ .field = .@"group-highlight", .description = "Uses a color table for each group match, this will only color group matches other than 0 unless overriden with --groups." },
 
-            .{ .field = .trace, .description = "Enabled event trace " },
-            .{ .field = .verbose, .description = "Verbose mode" },
-            .{ .field = .byteRanges, .description = "Range of bytes for n files, top-level array length has to be of (len <= files.len) and will be applied sequentially over files" },
+            .{ .field = .trace, .description = "Enabled event trace." },
+            .{ .field = .verbose, .description = "Verbose mode." },
         },
         .positionalsDescription = .{
             .tuple = &.{
-                "PCRE2 regex pattern to use on all files",
+                "PCRE2 regex pattern to use on all files.",
             },
-            .reminder = "Files or paths to be operated on",
+            .reminder = "Files or paths to be operated on.",
         },
-    };
-
-    pub const Match = struct {
-        @"match-n": ?usize = null,
-
-        pub const Positionals = positionals.EmptyPositionalsOf;
-
-        pub const Short = .{
-            .n = .@"match-n",
-        };
-
-        pub const Help: HelpData(@This()) = .{
-            .usage = &.{"seeksub ... match <options> ..."},
-            .description = "Matches based on options at the top-level. This performs no mutation or replacement, it's simply a dry-run",
-            .shortDescription = "(Default) Match-only operation. This is a dry-run with no replacement",
-            .optionsDescription = &.{
-                .{ .field = .@"match-n", .description = "N-match stop for each file if set" },
-            },
-        };
-
-        pub const GroupMatch: GroupMatchConfig(@This()) = .{
-            .ensureCursorDone = false,
-        };
-    };
-
-    pub const Diff = struct {
-        replace: []const u8 = undefined,
-
-        const Positionals = positionals.EmptyPositionalsOf;
-
-        pub const Short = .{
-            .r = .replace,
-        };
-
-        pub const Help: HelpData(@This()) = .{
-            .usage = &.{"seeksub ... diff <options> ..."},
-            .description = "Matches based on options at the top-level and then performs a replacement over matches, providing a diff return but not actually mutating the files",
-            .shortDescription = "Dry-runs replacement. No mutation is performed",
-            .optionsDescription = &.{
-                .{ .field = .replace, .description = "Replace match on all files using this PCRE2 regex" },
-            },
-        };
-
-        pub const GroupMatch: GroupMatchConfig(@This()) = .{
-            .required = &.{.replace},
-            .ensureCursorDone = false,
-        };
-    };
-
-    pub const Apply = struct {
-        replace: []const u8 = undefined,
-        trace: bool = false,
-
-        pub const Positionals = positionals.EmptyPositionalsOf;
-
-        pub const Short = .{
-            .r = .replace,
-            .tt = .trace,
-        };
-
-        pub const Help: HelpData(@This()) = .{
-            .usage = &.{"seeksub ... apply <options> ..."},
-            .description = "Matches based on options at the top-level and then performs a replacement over matches. This is mutate the files",
-            .shortDescription = "Replaces based on match and replace PCRE2 regexes over all files",
-            .optionsDescription = &.{
-                .{ .field = .replace, .description = "Replace match on all files using this PCRE2 regex" },
-                .{ .field = .trace, .description = "Trace mutations" },
-            },
-        };
-
-        pub const GroupMatch: GroupMatchConfig(@This()) = .{
-            .required = &.{.replace},
-            .ensureCursorDone = false,
-        };
     };
 
     pub fn hasColor(self: *const @This(), fileType: fs.FileType) bool {
@@ -497,6 +412,7 @@ pub const TargetGroup = union(enum) {
 
 pub const HelpConf: help.HelpConf = .{
     .simpleTypes = true,
+    .headerDelimiter = "",
 };
 
 pub const ArgsRes = SpecResponseWithConfig(Args, HelpConf, true);

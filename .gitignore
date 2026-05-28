@@ -3,3 +3,4 @@ allgirs
 .zig-cache
 seele.zip
 zig-pkg
+dependencies

@@ -10,14 +10,18 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
         .omit_frame_pointer = optimize == .ReleaseFast,
     });
-    module.addImport("regent", b.dependency("regent", .{
+    const regent = b.dependency("regent", .{
         .target = target,
         .optimize = optimize,
-    }).module("regent"));
-    module.addImport("zcasp", b.dependency("zcasp", .{
+    }).module("regent");
+    const zcasp = b.dependency("zcasp", .{
         .target = target,
         .optimize = optimize,
-    }).module("zcasp"));
+    }).module("zcasp");
+
+    module.addImport("regent", regent);
+    module.addImport("zcasp", zcasp);
+    zcasp.addImport("regent", regent);
 
     const pcre2_dep = b.dependency("pcre2", .{
         .target = target,

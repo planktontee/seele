@@ -806,14 +806,12 @@ pub const GroupOnly = struct {
     lastLine: usize = 0,
 
     pub fn init(
-        delimiter: u8,
+        delimiter: []const u8,
         showLines: bool,
         pattern: tty.ColorPattern,
     ) @This() {
         return .{
-            .delimiter = switch (delimiter) {
-                inline else => |c| &.{c},
-            },
+            .delimiter = delimiter,
             .showLines = showLines,
             .colorPicker = .init(pattern),
         };

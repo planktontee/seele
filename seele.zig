@@ -151,11 +151,6 @@ pub fn handleArgsAndRun() !RunReturn {
         }
     }
 
-    if (argsRes.verb == null) argsRes.verb = .{
-        // NOTE: this is cleared in the argsRes.deinit
-        .match = .initEmpty(Context.instance.scrapAlloc),
-    };
-
     Context.argsRes = &argsRes;
 
     return switch (@intFromBool(argsRes.options.trace)) {
