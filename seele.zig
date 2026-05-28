@@ -330,6 +330,7 @@ pub fn matchFile(
         .fDetailed = fDetailed,
     };
 
+    // TODO: static dispatch for events instead of handrolling them/copy-pasting them
     fileLoop: while (true) {
         const readEvent = try fSource.nextLine();
         fileState: switch (readEvent) {
@@ -350,21 +351,31 @@ pub fn matchFile(
                 Context.baseEvent.line = line;
                 Context.baseEvent.lineN += 1;
                 lineCursor.init();
+                var firstLineMatch: bool = true;
 
                 lineLoop: while (lineCursor.hasReminder()) {
                     if (comptime matchT == .limited) {
                         if (matches >= argsRes.options.@"match-max") {
-                            // This check basically costs nothing
-                            if (comptime EventT.uses(.eol)) {
-                                var charOpt: ?u8 = null;
-                                if (lineCursor.lineToken > 0) {
-                                    const lastChar = lineCursor.line[lineCursor.lineToken - 1];
-                                    if (lastChar != '\n') charOpt = '\n';
+                            // copy-paste from regex.Regex.MatchError.NoMatch
+                            if (lineCursor.hadMatches) {
+                                if (comptime EventT.uses(.afterMatch)) {
+                                    Context.event = .{
+                                        .afterMatch = .{
+                                            .slice = lineCursor.reminder(),
+                                        },
+                                    };
+                                    _ = try fSink.consume(mode, EventT);
                                 }
+                            }
+                            // .noMatch event is not needed, all EvenHandlers except for NonMatchInLine skip it
+                            // this case is also a skip for NonMatchInLine since match >= target
+                            lineCursor.finish();
 
+                            // copy paste from out of line loop
+                            if (comptime EventT.uses(.eol)) {
                                 Context.event = .{
                                     .eol = .{
-                                        .charOpt = charOpt,
+                                        .charOpt = if (lineCursor.hasBreakline()) null else '\n',
                                         .hadMatches = lineCursor.hadMatches,
                                     },
                                 };
@@ -404,6 +415,12 @@ pub fn matchFile(
                                         },
                                     };
                                     _ = try fSink.consume(mode, EventT);
+                                    if (EventT == sink.NonMatchingLine) {
+                                        if (firstLineMatch) {
+                                            matches += 1;
+                                            firstLineMatch = false;
+                                        }
+                                    }
                                 }
                             }
                             lineCursor.finish();
@@ -414,7 +431,12 @@ pub fn matchFile(
                             return e;
                         },
                     };
-                    matches += 1;
+                    if (EventT == sink.LineOnMatch or EventT == sink.MatchInLine) {
+                        if (firstLineMatch) {
+                            matches += 1;
+                            firstLineMatch = false;
+                        }
+                    } else if (EventT == sink.NonMatchingLine) {} else matches += 1;
 
                     groupLoop: while (groupCursor.hasNextGroup()) {
                         groupCursor.loadGroup() catch |e| switch (e) {

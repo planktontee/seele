@@ -349,8 +349,8 @@ pub const Args = struct {
     pub fn hasColor(self: *const @This(), fileType: fs.FileType) bool {
         const colored = self.color;
 
-        return !self.@"invert-match" and ((colored != null and colored.? == true) or
-            (fileType == .tty and colored == null));
+        return (colored != null and colored.? == true) or
+            (fileType == .tty and colored == null);
     }
 
     pub fn targetGroup(self: *const @This(), eventHandlerT: sink.EventHanderT, maxGroups: u16) TargetGroup {

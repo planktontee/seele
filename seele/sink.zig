@@ -75,16 +75,16 @@ pub fn pickEventHandler(
 ) EventHandler {
     const showLines = argsRes.options.@"line-number";
 
-    if (argsRes.options.@"invert-match") return .{
-        .nonMatchingLine = .init(showLines, .noColor),
-    };
-
     switch (fDetailed.fileType) {
         .tty => {
             const colorPattern: tty.ColorPattern = if (argsRes.options.hasColor(fDetailed.fileType))
                 .escape
             else
                 .noColor;
+
+            if (argsRes.options.@"invert-match") return .{
+                .nonMatchingLine = .init(showLines, colorPattern),
+            };
 
             if (argsRes.options.@"match-only") {
                 return .{
@@ -124,6 +124,10 @@ pub fn pickEventHandler(
         .file,
         .pipe,
         => {
+            if (argsRes.options.@"invert-match") return .{
+                .nonMatchingLine = .init(showLines, .noColor),
+            };
+
             if (argsRes.options.@"match-only") return .{
                 .matchOnly = .init(
                     showLines,
