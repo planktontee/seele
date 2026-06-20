@@ -8,9 +8,7 @@ const args = @import("seele/args.zig");
 const regex = @import("seele/regex.zig");
 const sink = @import("seele/sink.zig");
 const fs = @import("seele/fs.zig");
-const FileCursor = fs.FileCursor;
 const source = @import("seele/source.zig");
-const mem = @import("seele/mem.zig");
 const Context = @import("seele/context.zig");
 const DebugAlloc = std.heap.DebugAllocator(.{
     .safety = true,
@@ -83,11 +81,12 @@ pub fn stackBufferTrampoline(comptime size: usize) !RunReturn {
             var debugAlloc = DebugAlloc.init;
             break :rv debugAlloc.allocator();
         } else {
-            var sfba = mem.stackFallback(
-                scrapSize,
-                std.heap.page_allocator,
+            var buff: [scrapSize]u8 = undefined;
+            var sfba = regent.mem.stackFallback(
+                &buff,
+                std.heap.smp_allocator,
             );
-            break :rv sfba.get();
+            break :rv sfba.allocator();
         }
     };
     const inAlloc = rv: {
@@ -95,11 +94,12 @@ pub fn stackBufferTrampoline(comptime size: usize) !RunReturn {
             var debugAlloc = DebugAlloc.init;
             break :rv debugAlloc.allocator();
         } else {
-            var sfba = mem.stackFallback(
-                size,
-                std.heap.page_allocator,
+            var buff: [size]u8 = undefined;
+            var sfba = regent.mem.stackFallback(
+                &buff,
+                std.heap.smp_allocator,
             );
-            break :rv sfba.get();
+            break :rv sfba.allocator();
         }
     };
     const outAlloc = rv: {
@@ -107,11 +107,12 @@ pub fn stackBufferTrampoline(comptime size: usize) !RunReturn {
             var debugAlloc = DebugAlloc.init;
             break :rv debugAlloc.allocator();
         } else {
-            var sfba = mem.stackFallback(
-                size,
-                std.heap.page_allocator,
+            var buff: [size]u8 = undefined;
+            var sfba = regent.mem.stackFallback(
+                &buff,
+                std.heap.smp_allocator,
             );
-            break :rv sfba.get();
+            break :rv sfba.allocator();
         }
     };
 
@@ -167,9 +168,8 @@ pub const RunError = error{
     regex.CompileError ||
     regex.Regex.MatchError ||
     regex.RegexMatch.GroupError ||
-    FileCursor.OpenError ||
+    @typeInfo(@typeInfo(@TypeOf(regent.fs.FileCursor(.read).next)).@"fn".return_type.?).error_union.error_set ||
     fs.DetectTypeError ||
-    fs.FileCursor.OpenError ||
     source.SourceReader.InitError ||
     source.ReadEvent.Error ||
     sink.Sink.ConsumeError ||
@@ -189,25 +189,40 @@ pub fn run(comptime mode: sink.Mode) RunError!RunReturn {
     // TODO: add multiline
     if (!argsRes.options.@"line-by-line") return RunError.UnsupportedMatchMode;
 
-    // TODO:
-    // detection of binaries
-    // filtering
-    const isRecursive = argsRes.options.recursive;
-    var fileCursor = FileCursor.init(argsRes, isRecursive);
-    defer fileCursor.deinit();
+    // TODO: filtering
+    const isRecursive = argsRes.options.recursive or argsRes.options.@"recursive-follow-symlink";
+    const followSymlink = argsRes.options.@"recursive-follow-symlink";
+    const paths = if (argsRes.positionals.reminder) |paths|
+        paths
+    else
+        @as([]const []const u8, &.{"-"});
+
+    var fc = regent.fs.FileCursor(.read).initWithConfig(paths, .{
+        .recursive = isRecursive,
+        .followSymlink = followSymlink,
+    });
+    defer fc.deinit();
+
+    const rContext: regent.ergo.Context = .{ .io = Context.io, .allocator = Context.instance.scrapAlloc };
 
     var firstMissing: bool = true;
 
     var fSource: source.Source = undefined;
     defer if (!firstMissing) fSource.deinit(Context.instance.inAlloc);
 
-    const stdoutFd = std.Io.File.stdout();
-    const stdout = try fs.DetailedFile.from(
-        stdoutFd,
-        "",
-        "(stdout)",
-        &(try stdoutFd.stat(Context.io)),
-    );
+    const stdoutFile = std.Io.File.stdout();
+    const stdout: fs.DetailedFile = r: {
+        const wStream = try regent.fs.FileStream(.write).openStreamWithConfig(
+            .{ .io = Context.io, .allocator = Context.instance.scrapAlloc },
+            stdoutFile,
+            .{ .followSymlink = false },
+            .unmanaged,
+            .defaultWriterConfig,
+            null,
+        );
+
+        break :r try .fromFStream(.write, wStream, "(stdout)");
+    };
 
     try Context.sinkp.init(
         &stdout,
@@ -242,10 +257,12 @@ pub fn run(comptime mode: sink.Mode) RunError!RunReturn {
 
     var hadMatches = false;
 
-    while (try fileCursor.next(scrapAlloactor)) |input| {
-        defer fileCursor.closeCurrent();
+    while (try fs.DetailedFile.next(.read, &fc, rContext)) |input| {
+        defer input.file.close(Context.io);
+
         if (firstMissing) {
-            const showFileName = fileCursor.hasRelativePaths();
+            // This is technically not correct
+            const showFileName = fc.cursor != null or fc.paths.len > 1;
             fSource = try source.Source.init(
                 &input,
                 Context.instance.inAlloc,
@@ -841,6 +858,5 @@ pub const LineMatchCursor = struct {
 };
 
 comptime {
-    _ = mem;
     _ = @import("seele/tty.zig");
 }

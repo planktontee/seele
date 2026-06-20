@@ -1,7 +1,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const builtin = @import("builtin");
-const mem = @import("mem.zig");
 const FileWriter = std.Io.File.Writer;
 const Writer = std.Io.Writer;
 const Allocator = std.mem.Allocator;

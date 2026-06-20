@@ -393,16 +393,9 @@ pub const Event = union(enum) {
             // NOTE: this will be incredibly wasteful
             // move to sink later as part of the trace mode
             const fileType: fs.FileType = rv: {
-                const stderrFd = std.Io.File.stderr();
-                const stat = stderrFd.stat(Context.io) catch break :rv .file;
-                const detailedFile = fs.DetailedFile.from(
-                    stderrFd,
-                    "",
-                    "(stderr)",
-                    &stat,
-                ) catch
-                    break :rv .file;
-                break :rv detailedFile.fileType;
+                const stderrFile = std.Io.File.stderr();
+                const stat = stderrFile.stat(Context.io) catch break :rv .file;
+                break :rv fs.detectType(stderrFile, &stat) catch .file;
             };
             switch (fileType) {
                 .tty => {
@@ -1257,13 +1250,11 @@ pub const MatchInLine = struct {
 
         var buffSize: usize = 0;
         if (self.fDetailed) |fDetailed| {
-            var chunks = self.colorPicker.chunks(4, 0);
+            var chunks = self.colorPicker.chunks(2, 0);
             chunks.forceColoredChunk(
                 tty.EscapeColor.magenta.escapeCode(),
-                fDetailed.path[0],
+                fDetailed.path,
             );
-            chunks.forceChunk(fDetailed.path[1]);
-            chunks.forceChunk(fDetailed.path[2]);
             chunks.forceColoredChunk(
                 tty.EscapeColor.reset.escapeCode(),
                 self.prefixDelimiter(),

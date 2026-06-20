@@ -1,7 +1,7 @@
 .{
-    .name = .seeksub,
+    .name = .seele,
     .version = "0.0.1",
-    .fingerprint = 0x26358d0de677914,
+    .fingerprint = 0xce24d284b3f929e2,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .pcre2 = .{
@@ -19,12 +19,12 @@
         //     .path = "dependencies/regent",
         // },
         .regent = .{
-            .url = "git+https://github.com/planktontee/regent.git#b94a868b9bd5c04a313d7089f6a0250e244a91af",
-            .hash = "regent-0.0.1-zgdbw77lAADxMS0YqpqaFGRB986dx13Dp6qlxJIeAD_d",
+            .url = "git+https://github.com/planktontee/regent.git#5b25a7241c9653e76800db16eaaaa0c23b7c184e",
+            .hash = "regent-0.0.1-zgdbw-xMAQDYnmnshmvsoMyxkvVj_UY_jgnWqcBCSEpX",
         },
         .zcasp = .{
-            .url = "git+https://github.com/planktontee/zcasp.git#240dda2b1c8af46aa698910dab691d9de5ad510c",
-            .hash = "zcasp-0.0.1-iIb82F5GAwDOGUkV4_gqqQuhfYSUKq1SgCNdL61VVFd4",
+            .url = "git+https://github.com/planktontee/zcasp.git#6ce5d54ff8bf92135cca4235bf0eb146a0d25edc",
+            .hash = "zcasp-0.0.1-iIb82F5GAwCEo-WdKDEIgb4JwOyRtjkZYhmvw2CJEhai",
         },
     },
     .paths = .{

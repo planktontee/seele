@@ -171,6 +171,7 @@ pub const Args = struct {
     @"validate-utf8": bool = false,
 
     recursive: bool = false,
+    @"recursive-follow-symlink": bool = false,
 
     color: ?bool = null,
     @"group-highlight": bool = false,
@@ -203,7 +204,8 @@ pub const Args = struct {
         .vB = .@"skip-binary",
         .vU = .@"validate-utf8",
 
-        .R = .recursive,
+        .r = .recursive,
+        .R = .@"recursive-follow-symlink",
 
         .gH = .@"group-highlight",
     };
@@ -225,7 +227,7 @@ pub const Args = struct {
     };
 
     pub const Help: HelpData(@This()) = .{
-        .usage = &.{"seeksub <options> ... <pattern> <files>"},
+        .usage = &.{"seele <options> ... <pattern> <files>"},
         .description = "CLI tool to run PCRE2 regex matches on files.",
         .optionsDescription = &.{
             .{ .field = .@"line-by-line", .description = "Line by line matching." },
@@ -246,6 +248,7 @@ pub const Args = struct {
             .{ .field = .@"validate-utf8", .description = "Validate ut8 (this requires all bytes to be checked)." },
 
             .{ .field = .recursive, .description = "Recursively matches all files in paths." },
+            .{ .field = .@"recursive-follow-symlink", .description = "Recursively matches all files in paths, following symlink." },
 
             .{ .field = .color, .description = "Colors matches." },
             .{ .field = .@"group-highlight", .description = "Uses a color table for each group match, this will only color group matches other than 0 unless overriden with --groups." },
