@@ -97,25 +97,37 @@ pub const ColoredChunks = struct {
     pub fn clearChunk(self: *@This(), chunk: []const u8) void {
         assert(self.at + 2 <= Context.slices.len);
         if (chunk.len > 0) {
-            Context.slices[self.at] = self.colorPicker.reset();
-            Context.slices[self.at + 1] = chunk;
+            const color = self.colorPicker.reset();
+            if (color.len > 0) {
+                Context.slices[self.at] = color;
+                Context.slices[self.at + 1] = chunk;
+                self.at += 2;
+            } else {
+                Context.slices[self.at] = chunk;
+                Context.slices.len -= 1;
+                self.at += 1;
+            }
         } else {
-            Context.slices[self.at] = "";
-            Context.slices[self.at + 1] = "";
+            Context.slices.len -= 2;
         }
-        self.at += 2;
     }
 
     pub fn coloredChunk(self: *@This(), chunk: []const u8) void {
         assert(self.at + 2 <= Context.slices.len);
         if (chunk.len > 0) {
-            Context.slices[self.at] = self.colorPicker.pickColor(self.colorOffset);
-            Context.slices[self.at + 1] = chunk;
+            const color = self.colorPicker.pickColor(self.colorOffset);
+            if (color.len > 0) {
+                Context.slices[self.at] = color;
+                Context.slices[self.at + 1] = chunk;
+                self.at += 2;
+            } else {
+                Context.slices[self.at] = chunk;
+                Context.slices.len -= 1;
+                self.at += 1;
+            }
         } else {
-            Context.slices[self.at] = "";
-            Context.slices[self.at + 1] = "";
+            Context.slices.len -= 2;
         }
-        self.at += 2;
     }
 
     pub fn forceColoredChunk(self: *@This(), color: []const u8, chunk: []const u8) void {
@@ -126,14 +138,13 @@ pub const ColoredChunks = struct {
     }
 
     pub fn forceChunk(self: *@This(), chunk: []const u8) void {
-        self.forceColoredChunk("", chunk);
+        assert(self.at + 2 <= Context.slices.len);
+        self.add(chunk);
     }
 
     pub fn skipChunk(self: *@This()) void {
         assert(self.at + 2 <= Context.slices.len);
-        Context.slices[self.at] = "";
-        Context.slices[self.at + 1] = "";
-        self.at += 2;
+        Context.slices.len -= 2;
     }
 
     pub fn breakline(self: *@This()) void {
@@ -143,9 +154,9 @@ pub const ColoredChunks = struct {
 
     pub fn add(self: *@This(), chunk: []const u8) void {
         assert(self.at + 2 <= Context.slices.len);
-        Context.slices[self.at] = "";
-        Context.slices[self.at + 1] = chunk;
-        self.at += 2;
+        Context.slices[self.at] = chunk;
+        Context.slices.len -= 1;
+        self.at += 1;
     }
 };
 
@@ -164,8 +175,8 @@ pub const UncoloredChunks = struct {
         self.clearChunk(chunk);
     }
 
-    pub fn skipChunk(self: *@This()) void {
-        self.clearChunk("");
+    pub fn skipChunk(_: *@This()) void {
+        Context.slices.len -= 1;
     }
 
     pub fn forceColoredChunk(self: *@This(), _: []const u8, chunk: []const u8) void {

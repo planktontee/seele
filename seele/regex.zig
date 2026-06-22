@@ -116,7 +116,7 @@ pub const Regex = struct {
     pub const MatchError = error{
         MatchDataTooBig,
         NoMatch,
-        BadUTF8Encode,
+        BadUTF8Encoding,
         UnknownError,
     };
 
@@ -152,7 +152,7 @@ pub const Regex = struct {
                 // -23 ... -3
                 c.PCRE2_ERROR_UTF8_ERR21...c.PCRE2_ERROR_UTF8_ERR1 => {
                     @branchHint(.unlikely);
-                    return MatchError.BadUTF8Encode;
+                    return MatchError.BadUTF8Encoding;
                 },
                 // NOTE: most error are data related or group related or utf related
                 // check the ERROR definition in the lib

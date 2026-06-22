@@ -62,7 +62,10 @@ pub const EventHandler = union(enum) {
     ) Sink.ConsumeError!void {
         switch (self.*) {
             inline else => |*handler| {
-                vec[0] = handler.colorPicker.reset();
+                const c = handler.colorPicker.reset();
+                if (c.len != 0)
+                    try Context.instance.stderrW.writeAll(c);
+
                 try Context.instance.stderrW.writeVecAll(vec);
             },
         }
@@ -653,21 +656,20 @@ pub const Sink = struct {
         const data: [][]const u8 = Context.getSlices();
         if (comptime validate) {
             var i: usize = data.len;
-            const step: usize = if (self.hasColor) 2 else 1;
-
-            while (i > Context.buffAt) : (i -|= step) {
+            while (i > 0) : (i -= 1)
                 if (!std.unicode.utf8ValidateSlice(data[i - 1]))
                     return SinkWriteError.BadUTF8Encoding;
-            }
         }
 
-        switch (self.sinkWriter) {
-            .growing,
-            => |w| try w.writer().writeVecAll(data),
-            .buffered,
-            .directWrite,
-            => |*w| try w.interface.writeVecAll(data),
-        }
+        const w: *std.Io.Writer = switch (self.sinkWriter) {
+            .growing => |w| w.writer(),
+            .buffered, .directWrite => |*w| &w.interface,
+        };
+
+        if (data.len == 1)
+            try w.writeAll(data[0])
+        else
+            try w.writeVecAll(data);
     }
 
     pub fn sinkLine(self: *@This()) Writer.Error!void {

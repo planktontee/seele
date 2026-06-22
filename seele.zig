@@ -164,6 +164,7 @@ pub fn handleArgsAndRun() !RunReturn {
 pub const RunError = error{
     BadInputFile,
     UnsupportedMatchMode,
+    BinaryFileDetected,
 } ||
     regex.CompileError ||
     regex.Regex.MatchError ||
@@ -292,7 +293,33 @@ pub fn run(comptime mode: sink.Mode) RunError!RunReturn {
                                     src,
                                     &input,
                                 ) catch |e| switch (e) {
-                                    sink.Sink.SinkWriteError.BadUTF8Encoding => 0,
+                                    error.BinaryFileDetected => r: {
+                                        @branchHint(.cold);
+                                        try Context.sinkp.sink();
+                                        var messages: [2][]const u8 = .{
+                                            input.path,
+                                            ": binary file detected\n",
+                                        };
+                                        try fSink.eventHandler.stderrMessage(&messages);
+                                        try Context.instance.stderrW.flush();
+                                        break :r 0;
+                                    },
+                                    // NOTE: in grep fast skip wont trigger this, we are triggering it
+                                    // this is not perfect, if this gets triggered during consume, .eof never happened
+                                    // so flush may be wonky
+                                    error.BadUTF8Encoding => r: {
+                                        @branchHint(.cold);
+
+                                        try Context.sinkp.sink();
+                                        var messages: [2][]const u8 = .{
+                                            input.path,
+                                            ": bad utf8 encoding detected\n",
+                                        };
+                                        try fSink.eventHandler.stderrMessage(&messages);
+                                        try Context.instance.stderrW.flush();
+
+                                        break :r 0;
+                                    },
                                     else => return e,
                                 };
 
@@ -356,8 +383,8 @@ pub fn matchFile(
             .line,
             => |line| {
                 if (fSource.isInvalid()) {
-                    @branchHint(.unlikely);
-                    continue :fileState .eof;
+                    @branchHint(.cold);
+                    return error.BinaryFileDetected;
                 }
 
                 Context.baseEvent.line = line;
@@ -398,16 +425,15 @@ pub fn matchFile(
                     }
 
                     if (argsRes.options.@"validate-utf8")
-                        lineCursor.fastBadUTF8Skip();
+                        if (lineCursor.fastBadUTF8Check()) {
+                            @branchHint(.cold);
+                            return error.BadUTF8Encoding;
+                        };
 
                     lineCursor.matchNext(
                         rgx,
                         &groupCursor,
                     ) catch |e| switch (e) {
-                        regex.Regex.MatchError.BadUTF8Encode => {
-                            @branchHint(.unlikely);
-                            continue :fileState .eof;
-                        },
                         regex.Regex.MatchError.NoMatch => {
                             @branchHint(.unpredictable);
                             if (lineCursor.hadMatches) {
@@ -827,17 +853,22 @@ pub const LineMatchCursor = struct {
     }
 
     // NOTE: we are skipping only the easy bytes here
-    pub fn fastBadUTF8Skip(self: *@This()) void {
-        var offset = self.lineToken;
-        loop: switch (self.line[offset]) {
+    pub fn fastBadUTF8Check(self: *@This()) bool {
+        // var offset = self.lineToken;
+        switch (self.line[self.lineToken]) {
             0b0000_0000...0b0111_1111,
             0b1100_0000...0b1101_1111,
             0b1110_0000...0b1110_1111,
             0b1111_0000...0b1111_0111,
-            => self.forwardTo(offset),
+            => {
+                self.forwardTo(self.lineToken);
+                return false;
+            },
             else => {
-                offset += 1;
-                continue :loop if (offset < self.line.len) self.line[offset] else '\x00';
+                // Should this throw bad utf8 instead? grep doenst
+                return true;
+                // offset += 1;
+                // continue :loop if (offset < self.line.len) self.line[offset] else '\x00';
             },
         }
     }
