@@ -9,7 +9,9 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
         .omit_frame_pointer = optimize == .ReleaseFast,
-        .strip = optimize == .ReleaseFast and !(b.option(bool, "keep-symbols", "Keep symbols") orelse false),
+        .strip = (
+            optimize == .ReleaseFast and !(b.option(bool, "keep-symbols", "Keep symbols") orelse false)
+        ) or optimize != .ReleaseFast,
     });
     const regent = b.dependency("regent", .{
         .target = target,
