@@ -1,6 +1,23 @@
 const std = @import("std");
+const regentBuild = @import("regent").lib.build;
 
 pub fn build(b: *std.Build) !void {
+    var scrapBuf: [1 << 20]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scrapBuf);
+    const scrapAlloc = fba.allocator();
+
+    var errBuf: [1024]u8 = undefined;
+    const io = v: {
+        var tIo = std.Io.Threaded.init_single_threaded;
+        break :v tIo.io();
+    };
+    var eW = std.Io.File.stderr().writerStreaming(io, &errBuf);
+    const ctx: regentBuild.Ctx = .{
+        .allocator = scrapAlloc,
+        .io = io,
+        .errW = &eW.interface,
+    };
+
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
@@ -32,36 +49,56 @@ pub fn build(b: *std.Build) !void {
     });
 
     // TODO: find a better way of doing this
-    var sljitTargetBuff: std.ArrayList(u8) = .empty;
-    try sljitTargetBuff.print(b.allocator, "{s}/deps/sljit", .{
-        pcre2_dep.path(".").getPath(b),
-    });
-    const sljitPathTarget = try sljitTargetBuff.toOwnedSlice(b.allocator);
+    const sljitPathTarget = try std.mem.concatMaybeSentinel(
+        ctx.allocator,
+        u8,
+        &.{
+            pcre2_dep.path(".").getPath(b),
+            "/deps/sljit",
+        },
+        null,
+    );
+    defer ctx.allocator.free(sljitPathTarget);
 
     const sljit = b.dependency("sljit", .{
         .target = target,
         .optimize = optimize,
     });
 
-    var rCode: u8 = undefined;
-    _ = pcre2_dep.builder.runAllowFail(
-        &.{
-            "rmdir",
-            sljitPathTarget,
-        },
-        &rCode,
-        .close,
-    ) catch {};
-    _ = pcre2_dep.builder.runAllowFail(
+    regentBuild.runCmdQuiet(&ctx, pcre2_dep.builder, &.{
+        "rmdir",
+        sljitPathTarget,
+    });
+
+    const sljitPathStub, _ = std.mem.cutLast(u8, sljitPathTarget, "sljit").?;
+
+    regentBuild.runCmdQuiet(&ctx, pcre2_dep.builder, &.{
+        "mkdir",
+        sljitPathStub,
+    });
+    const sljitPath = sljit.path(".").getPath(b);
+    regentBuild.runCmdQuiet(
+        &ctx,
+        pcre2_dep.builder,
         &.{
             "ln",
-            "-s",
-            sljit.path(".").getPath(b),
+            "-sfn",
+            sljitPath,
             sljitPathTarget,
         },
-        &rCode,
-        .close,
-    ) catch {};
+    );
+    try regentBuild.runCmdAssert(
+        false,
+        true,
+        &ctx,
+        pcre2_dep.builder,
+        &.{
+            "readlink",
+            sljitPathTarget,
+        },
+        sljitPath,
+    );
+
     module.linkLibrary(pcre2_dep.artifact("pcre2-8"));
 
     const unit_tests = b.addTest(.{
