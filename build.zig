@@ -26,7 +26,7 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
         .omit_frame_pointer = optimize == .ReleaseFast,
-        .strip = (optimize == .ReleaseFast and !(b.option(bool, "keep-symbols", "Keep symbols") orelse false)) or optimize != .ReleaseFast,
+        .strip = (optimize == .ReleaseFast and !(b.option(bool, "keep-symbols", "Keep symbols") orelse false)) or optimize == .ReleaseFast,
     });
     const regent = b.dependency("regent", .{
         .target = target,
@@ -101,13 +101,21 @@ pub fn build(b: *std.Build) !void {
 
     module.linkLibrary(pcre2_dep.artifact("pcre2-8"));
 
+    const test_filters = b.option(
+        []const []const u8,
+        "test-filter",
+        "Filter tests by string match",
+    ) orelse &.{};
+
     const unit_tests = b.addTest(.{
         .root_module = module,
+        .filters = test_filters,
+        .use_llvm = true,
     });
+    b.installArtifact(unit_tests);
     const run_unit_tests = b.addRunArtifact(unit_tests);
 
-    const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_unit_tests.step);
+    b.getInstallStep().dependOn(&run_unit_tests.step);
 
     const exe = b.addExecutable(.{
         .name = "seele",
@@ -115,15 +123,4 @@ pub fn build(b: *std.Build) !void {
         .use_llvm = true,
     });
     b.installArtifact(exe);
-
-    const run_cmd = b.addRunArtifact(exe);
-
-    run_cmd.step.dependOn(b.getInstallStep());
-
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
-
-    const run_step = b.step("run", "Run the app");
-    run_step.dependOn(&run_cmd.step);
 }

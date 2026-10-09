@@ -131,6 +131,7 @@ pub const ArgsCodec = struct {
         var chainedGroup: ChainedGroup = .{};
         if (linearIterTargets.items.len > 0) {
             const linearItems = try linearIterTargets.toOwnedSlice(allocator.*);
+            errdefer allocator.free(linearItems);
             for (targets.items) |range| {
                 for (linearItems) |item| {
                     if (range.includes(item)) return Error.ItemOverlapsWithRange;
@@ -419,3 +420,113 @@ pub const HelpConf: help.HelpConf = .{
 };
 
 pub const ArgsRes = SpecResponseWithConfig(Args, HelpConf, true);
+
+const DebugCursor = regent.collections.DebugCursor;
+const t = std.testing;
+
+fn testParseGroup(allocator: *const std.mem.Allocator, data: []const u8) !TargetGroup {
+    const cursor = v: {
+        var dcursor: DebugCursor = .{ .data = &.{data} };
+        var cursor = dcursor.asCursor();
+        break :v &cursor;
+    };
+    const codec = v: {
+        var codec: ArgsCodec = .{};
+        break :v &codec;
+    };
+
+    return try codec.parseGroups(allocator, cursor);
+}
+
+fn expectRange(data: []const u8, expected: anytype) !void {
+    const allocator = &t.allocator;
+    const r = testParseGroup(allocator, data);
+    defer if (r) |targetGroup| switch (targetGroup) {
+        .perItem => |perItem| allocator.free(perItem.arr),
+        .chained => |chained| {
+            allocator.free(chained.ranges);
+            if (chained.perItem.arr.len > 0)
+                allocator.free(chained.perItem.arr);
+        },
+        else => {},
+    } else |_| {};
+
+    if (@typeInfo(@TypeOf(expected)) == .error_set)
+        try t.expectError(expected, r)
+    else
+        try t.expectEqualDeep(expected, try r);
+}
+
+test "ArgsCodec.parseGroups" {
+    try expectRange("0,1", error.Group0NotAlone);
+    try expectRange("2,1", error.LinearItemsNotSorted);
+    try expectRange("0..1", error.InvalidRange);
+    try expectRange("2..1", error.InvalidRange);
+    try expectRange("1..3,2..4", error.RangesOverlap);
+    try expectRange("3..5,1..2", error.RangesNotSorted);
+    try expectRange("", error.EmptyTargetGroups);
+    try expectRange("1..3,2", error.ItemOverlapsWithRange);
+
+    try expectRange("0", TargetGroup{ .zero = .{} });
+    try expectRange(
+        "1",
+        TargetGroup{
+            .chained = .{
+                .perItem = .{ .arr = &.{1} },
+            },
+        },
+    );
+    try expectRange(
+        "1,2",
+        TargetGroup{
+            .chained = .{
+                .perItem = .{ .arr = &.{ 1, 2 } },
+            },
+        },
+    );
+    try expectRange(
+        "1..3",
+        TargetGroup{
+            .chained = .{
+                .ranges = &.{
+                    .{ .start = 1, .end = 3 },
+                },
+            },
+        },
+    );
+    try expectRange(
+        "1..3,4..5",
+        TargetGroup{
+            .chained = .{
+                .ranges = &.{
+                    .{ .start = 1, .end = 3 },
+                    .{ .start = 4, .end = 5 },
+                },
+            },
+        },
+    );
+    try expectRange(
+        "1..3,4,5..6",
+        TargetGroup{
+            .chained = .{
+                .ranges = &.{
+                    .{ .start = 1, .end = 3 },
+                    .{ .start = 5, .end = 6 },
+                },
+                .perItem = .{ .arr = &.{4} },
+            },
+        },
+    );
+    try expectRange(
+        "1..3,4,5..6,7",
+        TargetGroup{
+            .chained = .{
+                .ranges = &.{
+                    .{ .start = 1, .end = 3 },
+                    .{ .start = 5, .end = 6 },
+                },
+                .perItem = .{ .arr = &.{ 4, 7 } },
+            },
+        },
+    );
+}

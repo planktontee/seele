@@ -889,5 +889,6 @@ pub const LineMatchCursor = struct {
 };
 
 comptime {
+    _ = @import("seele/args.zig");
     _ = @import("seele/tty.zig");
 }
